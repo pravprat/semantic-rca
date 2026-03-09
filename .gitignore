@@ -1,0 +1,19 @@
+# runtime outputs
+outputs/
+semantic_runs/
+
+# python cache
+__pycache__/
+*.pyc
+
+# numpy / embeddings
+*.npy
+
+# mac
+.DS_Store
+
+# env
+.env
+
+
+
