@@ -59,11 +59,13 @@ def main() -> None:
     print("\n🎉 PIPELINE COMPLETE")
     print("Artifacts in:", OUTPUTS_DIR)
 
-import subprocess
+    print("\n========== PUBLISH RUN ==========")
+    result = subprocess.run(["python", "tools/publish_run.py"], cwd=PROJECT_ROOT)
+    if result.returncode != 0:
+        print("❌ PUBLISH RUN FAILED")
+        sys.exit(result.returncode)
+    print("✅ PUBLISH RUN COMPLETE")
 
-print("\n========== PUBLISH RUN ==========")
-
-subprocess.run(["python", "tools/publish_run.py"])
 
 if __name__ == "__main__":
     main()

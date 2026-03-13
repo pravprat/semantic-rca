@@ -38,6 +38,36 @@ def _explain_candidate(rc: Dict[str, Any]) -> List[str]:
 
     return lines
 
+# -------------------------------------------------------------
+# Build Incident Narrative
+# -------------------------------------------------------------
+def build_incident_narrative(root):
+    component = root.get("component")
+    failure = root.get("failure_mode")
+    behavior = root.get("cluster_behavior")
+    trigger = root.get("representative_raw_text")
+
+    downstream = root.get("downstream_neighbors", [])
+
+    narrative = {}
+
+    narrative["root_cause"] = f"{component} {failure}".strip()
+
+    narrative["behavior"] = behavior
+
+    if trigger:
+        narrative["trigger_event"] = trigger
+
+    propagation = []
+    for n in downstream:
+        cid = n.get("cluster_id")
+        if cid:
+            propagation.append(cid)
+
+    narrative["propagation_clusters"] = propagation
+    narrative["blast_radius"] = len(propagation)
+
+    return narrative
 
 # -------------------------------------------------------------
 # Build explanations JSON
@@ -58,6 +88,8 @@ def build_incident_explanations(
 
         for rc in inc.get("root_cause_candidates", []):
 
+            narrative = build_incident_narrative(rc)
+
             behavior = rc.get("cluster_behavior")
 
             explanation_lines = _explain_candidate(rc)
@@ -67,6 +99,7 @@ def build_incident_explanations(
                     "cluster_id": rc.get("cluster_id"),
                     "behavior": behavior,
                     "score": rc.get("score"),
+                    "narrative": narrative,
                     "explanation": explanation_lines
                 }
             )
@@ -84,6 +117,7 @@ def build_incident_explanations(
         json.dump(output, f, indent=2)
 
     return output
+
 
 
 # -------------------------------------------------------------
@@ -111,8 +145,31 @@ def write_explanation_report(
         for rc in inc.get("explanations", []):
 
             lines.append(f"### Cluster {rc['cluster_id']}")
+            lines.append("")
             lines.append(f"Behavior: {rc['behavior']}")
+            lines.append("")
             lines.append(f"Score: {round(rc['score'],2)}")
+            lines.append("")
+
+            narr = rc.get("narrative", {})
+
+            root = narr.get("root_cause")
+            trigger = narr.get("trigger_event")
+            prop = narr.get("propagation_clusters", [])
+            blast = narr.get("blast_radius")
+
+            if root:
+                lines.append(f"Root Cause: {root}")
+            lines.append("")
+            if trigger:
+                lines.append(f"Trigger Event: {trigger}")
+            lines.append("")
+            if prop:
+                lines.append(f"Propagation: {', '.join(prop)}")
+            lines.append("")
+            if blast is not None:
+                lines.append(f"Blast Radius: {blast}")
+            lines.append("")
             lines.append("")
 
             for l in rc["explanation"]:

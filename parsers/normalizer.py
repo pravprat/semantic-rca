@@ -1,18 +1,17 @@
-# semantic-rca/parsers/normalizer.py
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 
-_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b")
-_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
-_IP_RE = re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b")
-_LONG_NUM_RE = re.compile(r"\b\d{6,}\b")
-_TS_ISO_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b")
-_PATH_RE = re.compile(r"(/[\w\-.]+)+")
-_POD_HASH_RE = re.compile(r"\b([a-z0-9-]+)-[a-f0-9]{8,}\b")
+UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F\-]{27}\b"
+)
+IP_RE = re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b")
+HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+LONG_NUM_RE = re.compile(r"\b\d{6,}\b")
+PATH_RE = re.compile(r"(/[\w\-.]+)+")
 
 
 @dataclass(frozen=True)
@@ -22,39 +21,30 @@ class NormalizedText:
 
 
 class Normalizer:
-    """
-    Masks high-cardinality tokens and canonicalizes text to reduce false uniqueness.
-    """
-
     def normalize_text(self, text: str) -> NormalizedText:
         redactions: Dict[str, int] = {}
 
-        def sub(pattern: re.Pattern, repl: str, t: str, key: str) -> str:
+        def apply(pattern, repl, key, t):
             matches = pattern.findall(t)
             if matches:
-                redactions[key] = redactions.get(key, 0) + (len(matches) if isinstance(matches, list) else 1)
+                redactions[key] = len(matches)
             return pattern.sub(repl, t)
 
         t = text
-        t = sub(_TS_ISO_RE, "<TS>", t, "ts")
-        t = sub(_UUID_RE, "<UUID>", t, "uuid")
-        t = sub(_IP_RE, "<IP>", t, "ip")
-        t = sub(_HEX_RE, "<HEX>", t, "hex")
-        t = sub(_LONG_NUM_RE, "<NUM>", t, "num")
-        t = sub(_POD_HASH_RE, r"\1-<HASH>", t, "hash")
-        t = sub(_PATH_RE, "<PATH>", t, "path")
+        t = apply(UUID_RE, "<uuid>", "uuid", t)
+        t = apply(IP_RE, "<ip>", "ip", t)
+        t = apply(HEX_RE, "<hex>", "hex", t)
+        t = apply(LONG_NUM_RE, "<num>", "num", t)
+        t = apply(PATH_RE, "<path>", "path", t)
 
-        # Light canonicalization
         t = t.replace("\r", " ")
-        t = re.sub(r"\s+", " ", t).strip().lower()
+        t = re.sub(r"\s+", " ", t)
+        t = t.strip().lower()
 
-        return NormalizedText(normalized=t, redactions=redactions)
+        return NormalizedText(t, redactions)
 
-    def normalize_fields(self, fields: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Best-effort normalization of structured fields (strings only).
-        """
-        out: Dict[str, Any] = {}
+    def normalize_fields(self, fields: Dict[str, Any]):
+        out = {}
         for k, v in fields.items():
             if isinstance(v, str):
                 out[k] = self.normalize_text(v).normalized
@@ -67,23 +57,22 @@ class Normalizer:
         normalized_text: str,
         service: Optional[str],
         severity: Optional[str],
-        key_fields: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Creates the exact input string that will be embedded.
-        """
+        key_fields: Optional[Dict[str, Any]] = None,
+    ):
         parts = []
+
         if service:
             parts.append(f"service: {service}")
+
         if severity:
             parts.append(f"severity: {severity}")
+
         if key_fields:
-            # Keep it small and stable
-            for kk in sorted(key_fields.keys()):
-                vv = key_fields[kk]
-                if vv is None:
+            for k in sorted(key_fields):
+                v = key_fields[k]
+                if v is None:
                     continue
-                if isinstance(vv, (str, int, float, bool)):
-                    parts.append(f"{kk}: {vv}")
+                parts.append(f"{k}: {v}")
+
         parts.append(f"message: {normalized_text}")
         return " | ".join(parts)

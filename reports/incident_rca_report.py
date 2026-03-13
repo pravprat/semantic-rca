@@ -191,6 +191,24 @@ def write_incident_rca_report(
         lines.append(f"Score: {root.get('score', 0):.2f}")
         lines.append("")
 
+        component = root.get("component")
+        failure_mode = root.get("failure_mode")
+        status_class = root.get("status_class")
+        behavior = root.get("cluster_behavior")
+
+        if component or failure_mode:
+            lines.append("")
+            lines.append(f"Component: {component}")
+            lines.append(f"Failure Mode: {failure_mode}")
+            lines.append(f"Status Class: {status_class}")
+
+        if behavior:
+            lines.append("")
+            lines.append("Behavior:")
+            lines.append(f"{behavior}")
+
+        lines.append("")
+
         lines.append("### Cluster Behavior")
         lines.append(cluster_behavior)
         lines.append("")

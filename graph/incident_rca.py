@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import math
 from graph.cluster_behavior import extract_cluster_behavior
+from semantic.entity_extractor import extract_cluster_entities
+from semantic.signature import build_cluster_signature
 
 
 @dataclass
@@ -60,9 +62,9 @@ class IncidentRcaCandidate:
 
 HTTP_CLASS_WEIGHT = {
     "5xx": 3.0,
-    "4xx": 2.0,
-    "3xx": 1.2,
-    "2xx": 0.8,
+    "4xx": 2.4,
+    "3xx": 1.0,
+    "2xx": 0.6,
 }
 
 # Step 4 influence in RCA
@@ -476,8 +478,52 @@ def _top_evidence_neighbors(cid: str, edges: List[Dict[str, Any]], k: int = 5) -
     return [{"cluster_id": e["dst"], "weight": float(e["weight"])} for e in outs[:k]]
 
 
+def temporal_bonus(cluster_first_seen, incident_start):
+
+    if not cluster_first_seen or not incident_start:
+        return 0
+
+    try:
+        delta = (cluster_first_seen - incident_start).total_seconds()
+        if delta <= 0:
+            return 6
+        if delta < 30:
+            return 4
+        if delta < 120:
+            return 2
+        return 0
+    except Exception:
+        return 0
+
+## Causal dominance improvement ##
+
+def compute_transitive_downstream(cluster_id, edges_by_src, max_depth=4):
+
+    visited = set()
+    frontier = [cluster_id]
+
+    for _ in range(max_depth):
+
+        next_frontier = []
+
+        for node in frontier:
+
+            for e in edges_by_src.get(node, []):
+                dst = e["dst"]
+
+                if dst not in visited:
+                    visited.add(dst)
+                    next_frontier.append(dst)
+
+        frontier = next_frontier
+
+        if not frontier:
+            break
+
+    return len(visited)
+
 # ---------------------------------------------------------------------
-# Step 7: Per-incident ranking (uses Step 4 trigger stats)
+# Per-incident ranking (uses Step 4 trigger stats)
 # ---------------------------------------------------------------------
 
 def rank_root_causes_for_incident(
@@ -535,8 +581,8 @@ def rank_root_causes_for_incident(
         )
     ]
 
-    # fallback if filter removes everything
-    if not candidate_clusters:
+    # safeguard: ensure we always evaluate enough clusters
+    if len(candidate_clusters) < 3:
         candidate_clusters = incident_clusters
 
     for cid in sorted(candidate_clusters):
@@ -545,6 +591,8 @@ def rank_root_causes_for_incident(
         member_indices = _cluster_member_indices(c)
         size = int(c.get("size") or len(member_indices) or 0)
         rep_idx = _choose_representative_index(c, events)
+        semantic = extract_cluster_entities(c, events)
+
         if rep_idx < 0 or rep_idx >= len(events):
             rep_idx = -1
 
@@ -570,8 +618,15 @@ def rank_root_causes_for_incident(
         downstream_unique = {
             e["dst"]
             for e in edges_by_src.get(cid, [])
-            if e.get("weight", 0) > 1.0
+            if e.get("weight", 0) > 0
         }
+
+        transitive_downstream = compute_transitive_downstream(
+            cid,
+            edges_by_src
+        )
+
+        causal_dominance = math.log1p(transitive_downstream)
 
         # reduce blast radius influence
         downstream_score = min(4.0, len(downstream_unique) * 0.4)
@@ -589,7 +644,8 @@ def rank_root_causes_for_incident(
         )
 
         # prevent graph structure dominating anomaly signals
-        structural_score = max(0.0, min(structural_raw, 3.0))
+
+        structural_score = max(0.0, min(structural_raw, 5.0))
 
         # -----------------------------
         # trigger proximity (time-to-onset)
@@ -650,7 +706,7 @@ def rank_root_causes_for_incident(
         # background penalty (high freq + low influence)
         # -----------------------------
         baseline_rate = size / float(total_incident_events)
-        background_penalty = 0.3 if (baseline_rate > 0.05 and out_w.get(cid, 0.0) <= 0.0) else 1.0
+        background_penalty = 0.3 if (baseline_rate > 0.15 and out_w.get(cid, 0.0) <= 0.0) else 1.0
 
         # -----------------------------
         # final score: causal + onset + trigger
@@ -661,9 +717,12 @@ def rank_root_causes_for_incident(
                 + TRIGGER_SCORE_WEIGHT * trigger_score
                 + (ERROR_COUNT_WEIGHT * math.sqrt(error_count))
                 + downstream_score
+                + causal_dominance
         )
 
         score = score * http_mult * success_guard * background_penalty * temporal_penalty
+
+        score +=  temporal_bonus(cluster_first_seen, incident_start)
 
         candidates.append(
             IncidentRcaCandidate(
@@ -764,25 +823,53 @@ def build_incident_root_causes(
         )
 
         rc_list: List[Dict[str, Any]] = []
+
+
+
         for cand in ranked:
+            # get cluster again
+            c = clusters_by_id.get(cand.cluster_id, {})
+
+            downstream = [
+                {"cluster_id": e["dst"], "weight": e.get("weight", 1.0)}
+                for e in edges
+                if e.get("src") == cand.cluster_id
+            ]
+
+            # semantic extraction
+            semantic = extract_cluster_entities(c, events)
+
             rep_text = None
+
             if 0 <= cand.representative_index < len(events):
                 ev = events[cand.representative_index]
                 rep_text = (
-                    ev.get("raw_text")
-                    or ev.get("message")
-                    or ev.get("msg")
-                    or ev.get("text")
-                    or ev.get("log")
-                    or ev.get("body")
-                    or ev.get("line")
-                    or ""
+                        ev.get("raw_text")
+                        or ev.get("message")
+                        or ev.get("msg")
+                        or ev.get("text")
+                        or ev.get("log")
+                        or ev.get("body")
+                        or ev.get("line")
+                        or ""
                 )
+
+            # build cluster signature AFTER semantic extraction
+            root_obj = {
+                "component": semantic.get("component"),
+                "dominant_operation": cand.dominant_operation,
+                "dominant_resource": cand.dominant_resource,
+                "status_class": semantic.get("status_class"),
+            }
+
+            cluster_signature = build_cluster_signature(root_obj)
+
 
             rc_list.append(
                 {
                     "cluster_id": cand.cluster_id,
                     "score": cand.score,
+                    "cluster_signature": cluster_signature,
                     "cluster_type": cand.cluster_type,
                     "size": cand.size,
                     "in_weight": cand.in_weight,
@@ -790,7 +877,7 @@ def build_incident_root_causes(
                     "representative_index": cand.representative_index,
                     "representative_raw_text": rep_text,
                     "evidence_neighbors": cand.evidence_neighbors,
-                    "downstream_neighbors": cand.evidence_neighbors,
+                    "downstream_neighbors": downstream,
 
                     # kept
                     "severity_counts": cand.severity_counts,
@@ -822,6 +909,12 @@ def build_incident_root_causes(
                     "dominant_status": cand.dominant_status,
                     "frequency": cand.frequency,
                     "behavior_signature": cand.behavior_signature,
+                    
+                    #semantic
+                    "semantic_label": semantic.get("semantic_label"),
+                    "component": semantic.get("component"),
+                    "failure_mode": semantic.get("failure_mode"),
+                    "status_class": semantic.get("status_class"),
                 }
             )
 

@@ -208,6 +208,15 @@ def _incident_relationships(graph: Dict, incident_id: str) -> Dict:
 def render_incident_markdown(incident: Dict, rel: Dict) -> str:
 
     root = incident.get("root_cause", {})
+    component = root.get("component")
+    failure_mode = root.get("failure_mode")
+    status_class = root.get("status_class")
+    behavior = root.get("cluster_behavior")
+
+    trigger = root.get("representative_raw_text")
+
+    blast_radius = len(root.get("downstream_neighbors", []))
+
     summary = root.get("cluster_summary", {})
     signals = root.get("signals", {})
     timeline = sorted(
@@ -215,9 +224,9 @@ def render_incident_markdown(incident: Dict, rel: Dict) -> str:
         key=lambda x: x.get("timestamp") or ""
     )
 
-    service = _root_service(summary)
+    service = component or _root_service(summary)
 
-    error_count = signals.get("error_count")
+    error_count = signals.get("error_count") or 0
     trigger_score = signals.get("trigger_score")
 
     severity = _severity(error_count)
@@ -244,9 +253,11 @@ def render_incident_markdown(incident: Dict, rel: Dict) -> str:
     win = incident.get("incident_window", {})
 
     md.append(f"{win.get('start_time')} → {win.get('end_time')}\n\n")
-
+    md.append("")
     md.append(f"Incident Severity: **{severity}**\n")
+    md.append("")
     md.append(f"Incident Type: **{incident_type}**\n\n")
+    md.append("")
 
     md.append("---\n\n")
 
@@ -254,14 +265,15 @@ def render_incident_markdown(incident: Dict, rel: Dict) -> str:
 
     if rel.get("parents"):
         md.append(f"Parent Incidents: {', '.join(rel['parents'])}\n")
-
+    md.append("")
     if rel.get("children"):
         md.append(f"Child Incidents: {', '.join(rel['children'])}\n")
-
+    md.append("")
     if rel.get("is_downstream"):
         md.append("Classification: Downstream incident\n")
     else:
         md.append("Classification: Primary incident\n")
+    md.append("")
 
     md.append("\n---\n\n")
 
@@ -271,18 +283,32 @@ def render_incident_markdown(incident: Dict, rel: Dict) -> str:
     md.append("---\n\n")
 
     md.append("## Root Cause Candidate\n\n")
+    md.append("")
     md.append(f"Component: **{service}**\n\n")
-
+    md.append("")
+    if failure_mode:
+        md.append(f"Failure Mode: **{failure_mode}**\n\n")
+    md.append("")
+    if status_class:
+        md.append(f"Status Class: **{status_class}**\n\n")
+    md.append("")
     if cluster_behavior:
         md.append("### Cluster Behavior\n\n")
         md.append(f"{cluster_behavior}\n\n")
+    md.append("")
 
     md.append(
         f"Detected **{error_count} anomalous events** "
         f"(trigger_score={trigger_score}).\n\n"
     )
+    md.append("")
+    if trigger:
+        md.append('### Trigger Explanation \n\n')
+        md.append(f"{trigger}\n\n")
 
+    md.append("")
     confidence = root.get("confidence", {})
+
     md.append(
         f"Confidence: **{confidence.get('label', 'unknown')}** "
         f"({confidence.get('value', 'unknown')})\n\n"

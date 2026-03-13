@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 
-
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
@@ -13,7 +12,6 @@ def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except Exception:
         return None
-
 
 def _root_service(incident: Dict) -> str:
     root = incident.get("root_cause", {})
@@ -35,7 +33,6 @@ def _root_service(incident: Dict) -> str:
 
     return "unknown"
 
-
 def _timeline_services(incident: Dict, limit: int = 8) -> List[str]:
     seen = []
     for row in incident.get("timeline", [])[:limit]:
@@ -43,7 +40,6 @@ def _timeline_services(incident: Dict, limit: int = 8) -> List[str]:
         if svc and svc not in seen:
             seen.append(svc)
     return seen
-
 
 def _http_mix(incident: Dict) -> Dict[str, int]:
     root = incident.get("root_cause", {})
@@ -55,7 +51,6 @@ def _incident_window(incident: Dict) -> Tuple[Optional[datetime], Optional[datet
     win = incident.get("incident_window", {})
     return _parse_ts(win.get("start_time")), _parse_ts(win.get("end_time"))
 
-
 def _incident_type(incident: Dict) -> str:
     http = _http_mix(incident)
     if http.get("5xx", 0) > 0:
@@ -63,7 +58,6 @@ def _incident_type(incident: Dict) -> str:
     if http.get("4xx", 0) > 0:
         return "authorization_or_resource_access"
     return "operational_anomaly"
-
 
 def _overlap_or_near(
     a_start: Optional[datetime],
@@ -81,7 +75,6 @@ def _overlap_or_near(
 
     gap = int((b_start - a_end).total_seconds())
     return 0 <= gap <= max_gap_seconds, gap
-
 
 def _build_edge(
     parent: Dict,
@@ -148,7 +141,6 @@ def _build_edge(
         "to_root_service": c_root,
         "reasons": reasons,
     }
-
 
 def build_incident_graph(
     evidence_bundle: Dict,

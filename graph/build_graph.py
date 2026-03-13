@@ -39,6 +39,27 @@ def _load_events_jsonl(events_path: str) -> List[Dict[str, Any]]:
     return events
 
 
+def _create_event_node(event_idx: int, event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create an event node for explainability graph.
+    This does NOT replace cluster edges — it augments them.
+    """
+
+    msg = (
+        event.get("raw_text")
+        or event.get("message")
+        or event.get("msg")
+        or ""
+    )
+
+    return {
+        "id": f"E{event_idx}",
+        "type": "event",
+        "timestamp": event.get("timestamp"),
+        "message": msg[:500]
+    }
+
+
 # ---------------------------------------------------------------------
 # Core causal inference
 # ---------------------------------------------------------------------
@@ -76,7 +97,7 @@ def build_incident_timebucket_edges(
     # Bucket events within incident window
     # -----------------------------------------------------
 
-    for e in events:
+    for idx, e in enumerate(events):
 
         ts = _parse_ts(e.get("timestamp"))
         if ts is None:
@@ -90,7 +111,6 @@ def build_incident_timebucket_edges(
         if not eid:
             continue
 
-        # tolerate int/str mismatch
         cid = event_cluster_map.get(eid) or event_cluster_map.get(str(eid))
 
         if not cid:
@@ -108,7 +128,6 @@ def build_incident_timebucket_edges(
 
     bucket_ids = sorted(buckets.keys())
 
-    # cluster type lookup
     cluster_types = {
         cid: c.get("cluster_type", "contextual")
         for cid, c in clusters.items()
@@ -187,9 +206,13 @@ def build_semantic_graph_from_incidents(
     event_cluster_map: Dict[str, str],
     bucket_seconds: int = 10,
     lookahead_buckets: int = 3,
+    include_event_nodes: bool = True,
 ) -> Dict[str, Any]:
     """
     Build global cluster graph by aggregating edges from all incidents.
+
+    v1.3 enhancement:
+        optional cluster → event → cluster edges for explainability
     """
 
     events = _load_events_jsonl(events_path)
@@ -222,21 +245,48 @@ def build_semantic_graph_from_incidents(
             "id": cid,
             "type": "cluster",
 
-            # cluster statistics
             "size": int(c.get("size", len(c.get("member_indices", [])))),
             "cluster_type": c.get("cluster_type", "contextual"),
 
-            # temporal metadata (important for RCA)
             "first_seen_ts": c.get("first_seen_ts"),
             "last_seen_ts": c.get("last_seen_ts"),
 
-            # event count useful for baseline scoring
             "event_count": c.get("event_count", c.get("size"))
         })
+
+    event_nodes = []
+    event_edges = []
+
+    if include_event_nodes:
+
+        for idx, e in enumerate(events):
+
+            eid = e.get("event_id")
+            if not eid:
+                continue
+
+            cid = event_cluster_map.get(eid) or event_cluster_map.get(str(eid))
+            if not cid:
+                continue
+
+            event_node = _create_event_node(idx, e)
+
+            event_nodes.append(event_node)
+
+            event_edges.append({
+                "from": cid,
+                "to": event_node["id"],
+                "relation": "cluster_event",
+                "weight": 1.0,
+                "confidence": 1.0
+            })
+
+    nodes.extend(event_nodes)
 
     # -----------------------------------------------------
     # Edges
     # -----------------------------------------------------
+
     total_incidents = max(1, len(incidents))
 
     edges = []
@@ -267,8 +317,11 @@ def build_semantic_graph_from_incidents(
             }
         )
 
-    # compute node degrees
-    from collections import defaultdict
+    edges.extend(event_edges)
+
+    # -----------------------------------------------------
+    # Node degrees
+    # -----------------------------------------------------
 
     out_degree = defaultdict(int)
     in_degree = defaultdict(int)
@@ -282,13 +335,13 @@ def build_semantic_graph_from_incidents(
         if dst:
             in_degree[dst] += 1
 
-    #attach degrees to nodes
     for n in nodes:
         cid = n["id"]
         n["out_degree"] = out_degree.get(cid, 0)
         n["in_degree"] = in_degree.get(cid, 0)
 
     return {
+        "graph_version": "semantic_cluster_graph.v2",
         "nodes": nodes,
         "edges": edges,
     }

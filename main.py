@@ -19,10 +19,13 @@ from cluster.pattern_cluster import cluster_patterns
 from cluster.incident_cluster import build_incidents
 from cluster.trigger_analysis import run_trigger_analysis
 from cluster.incident_detection import run_incident_detection
+
 from graph.incident_rca import build_incident_root_causes
 from graph.build_graph import build_semantic_graph_from_incidents
+
 from reports.incident_rca_report import write_incident_rca_report
 from reports.rca_explainer import build_incident_explanations, write_explanation_report
+
 from tools.evidence_bundle import build_evidence_bundle
 from tools.llm_summarizer import LLMSummarizer
 from tools.incident_graph import write_incident_graph
@@ -53,21 +56,39 @@ def tag_cluster_type(cluster_size: int, total_events: int) -> str:
 #############################################
 
 def cmd_ingest(args):
+
     ensure_outputs()
+
     reader = LogReader()
     eventizer = Eventizer()
 
     events_path = os.path.join(OUTPUT_DIR, "events.jsonl")
+
     count = 0
+    batch = []
+    BATCH_SIZE = 2000
 
     with open(events_path, "w", encoding="utf-8") as out:
+
         for record in iter_records_from_path(reader, args.logfile):
-            for ev in eventizer.iter_events([record]):
+
+            batch.append(record)
+
+            if len(batch) >= BATCH_SIZE:
+
+                for ev in eventizer.iter_events(batch):
+                    out.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
+                    count += 1
+
+                batch.clear()
+
+        # flush remainder
+        if batch:
+            for ev in eventizer.iter_events(batch):
                 out.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
                 count += 1
 
     print(f"[ingest] wrote {count} events -> {events_path}")
-
 
 def load_events() -> List[Dict[str, Any]]:
     events_path = os.path.join(OUTPUT_DIR, "events.jsonl")

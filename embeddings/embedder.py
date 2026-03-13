@@ -56,14 +56,24 @@ class Embedder:
         if not texts:
             return EmbeddingResult(vectors=np.zeros((0, 0), dtype=np.float32), dim=0)
 
-        vectors = self.model.encode(
-            texts,
-            batch_size=64,
-            device="mps",
-            convert_to_numpy=True,
-            show_progress_bar=True,
-            normalize_embeddings=True  # ensures cosine similarity works
-        ).astype(np.float32)
+        CHUNK = 5000
+        all_vecs = []
+
+        for i in range(0, len(texts), CHUNK):
+            batch = texts[i:i + CHUNK]
+
+            vecs = self.model.encode(
+                batch,
+                batch_size=32,
+                device="mps",
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                normalize_embeddings=True
+            ).astype(np.float32)
+
+            all_vecs.append(vecs)
+
+        vectors = np.vstack(all_vecs)
 
         return EmbeddingResult(
             vectors=vectors,
