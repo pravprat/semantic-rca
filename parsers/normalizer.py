@@ -1,3 +1,5 @@
+#/parsers/normalizer.py
+
 from __future__ import annotations
 
 import re
@@ -53,11 +55,12 @@ class Normalizer:
         return out
 
     @staticmethod
+    @staticmethod
     def build_embedding_text(
-        normalized_text: str,
-        service: Optional[str],
-        severity: Optional[str],
-        key_fields: Optional[Dict[str, Any]] = None,
+            normalized_text: str,
+            service: Optional[str],
+            severity: Optional[str],
+            key_fields: Optional[Dict[str, Any]] = None,
     ):
         parts = []
 
@@ -67,12 +70,15 @@ class Normalizer:
         if severity:
             parts.append(f"severity: {severity}")
 
+        # ONLY include stable behavioral fields
         if key_fields:
-            for k in sorted(key_fields):
-                v = key_fields[k]
-                if v is None:
-                    continue
-                parts.append(f"{k}: {v}")
+            for k in ["verb", "resource", "http_class"]:
+                v = key_fields.get(k)
+                if v is not None:
+                    parts.append(f"{k}: {v}")
 
-        parts.append(f"message: {normalized_text}")
+        # IMPORTANT: only include message if explicitly meaningful
+        if normalized_text:
+            parts.append(f"message: {normalized_text}")
+
         return " | ".join(parts)

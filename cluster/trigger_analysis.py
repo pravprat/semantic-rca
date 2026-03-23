@@ -64,6 +64,9 @@ def run_trigger_analysis(
     cluster_error_count = defaultdict(int)
     cluster_times = defaultdict(list)
 
+    # ✅ NEW
+    cluster_actors = defaultdict(set)
+
     for e in events:
 
         event_id = e.get("event_id")
@@ -74,13 +77,15 @@ def run_trigger_analysis(
 
         cluster_event_count[cid] += 1
 
+        # ------------------------
+        # Response code
+        # ------------------------
         rc = (
-                e.get("response_code")
-                or e.get("status_code")
-                or e.get("code")
+            e.get("response_code")
+            or e.get("status_code")
+            or e.get("code")
         )
 
-        # nested Kubernetes audit field
         if rc is None:
             resp = e.get("responseStatus") or {}
             rc = resp.get("code")
@@ -93,13 +98,22 @@ def run_trigger_analysis(
         if rc >= 400:
             cluster_error_count[cid] += 1
 
+        # ------------------------
+        # Timestamp
+        # ------------------------
         ts = e.get("timestamp")
-
         if ts:
             try:
                 cluster_times[cid].append(_parse_ts(ts))
             except Exception:
                 pass
+
+        # ------------------------
+        # ✅ NEW: Actor tracking
+        # ------------------------
+        actor = e.get("actor") or e.get("service")
+        if actor:
+            cluster_actors[cid].add(actor)
 
     # -------------------------------------
     # Compute trigger metrics
@@ -125,15 +139,20 @@ def run_trigger_analysis(
             last = None
             duration = total_duration
 
-        cluster_rate = n / duration
+        # -------------------------------------
+        # Core signals
+        # -------------------------------------
 
+        cluster_rate = n / duration
         burst_factor = cluster_rate / max(global_rate, 1e-9)
 
         errors = cluster_error_count.get(cid, 0)
+        error_rate = errors / n if n > 0 else 0.0
 
-        error_rate = errors / n
+        # -------------------------------------
+        # Severity weighting
+        # -------------------------------------
 
-        # severity weighting
         if error_rate >= 0.8:
             severity = 3.0
         elif error_rate >= 0.4:
@@ -143,7 +162,39 @@ def run_trigger_analysis(
         else:
             severity = 0.2
 
+        # -------------------------------------
+        # Base trigger score (existing logic)
+        # -------------------------------------
+
         trigger_score = severity * (1 + math.log1p(burst_factor)) * error_rate
+
+        # -------------------------------------
+        # ✅ NEW: scale (event_count influence)
+        # -------------------------------------
+
+        scale = min(1.0, math.log1p(n) / 5.0)
+
+        # -------------------------------------
+        # ✅ NEW: systemic spread (actor diversity)
+        # -------------------------------------
+
+        actor_div = len(cluster_actors[cid])
+        spread = min(1.0, actor_div / 3.0)
+
+        # -------------------------------------
+        # ✅ Adjust trigger score (light modulation)
+        # -------------------------------------
+
+        adjusted_trigger = trigger_score
+        adjusted_trigger *= (0.5 + 0.5 * scale)
+        adjusted_trigger *= (0.7 + 0.3 * spread)
+
+        adjusted_trigger = adjusted_trigger / (1 + adjusted_trigger)
+        adjusted_trigger = round(adjusted_trigger, 6)
+
+        # -------------------------------------
+        # Output
+        # -------------------------------------
 
         results[cid] = {
 
@@ -163,8 +214,31 @@ def run_trigger_analysis(
 
             "burst_factor": round(burst_factor, 6),
 
-            "trigger_score": round(trigger_score, 6)
+            # Backward compatibility
+            "trigger_score_raw": round(trigger_score, 6),
+
+            # Final score
+            "trigger_score": adjusted_trigger,
+
+            # ✅ New signals
+            "scale": round(scale, 6),
+            "actor_diversity": actor_div,
+            "systemic_spread": round(spread, 6),
+
         }
+
+    # -------------------------------------
+    # Candidate selection (STABLE)
+    # -------------------------------------
+
+    if not results:
+        raise RuntimeError("[trigger_analysis] No clusters produced")
+
+    for cid, s in results.items():
+        s["is_candidate"] = (
+                s["trigger_score"] >= 0.15
+                or s["error_count"] >= 3
+        )
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)

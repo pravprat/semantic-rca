@@ -1,3 +1,5 @@
+#log_reader
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +10,10 @@ import gzip
 import re
 
 
+# ---------------------------------------------------------
+# Data Model
+# ---------------------------------------------------------
+
 @dataclass(frozen=True)
 class RawRecord:
     raw: str
@@ -15,9 +21,12 @@ class RawRecord:
     source_file: Optional[str] = None
 
 
+# ---------------------------------------------------------
+# Timestamp Detection (FIXED: removed ^ anchor)
+# ---------------------------------------------------------
+
 TIMESTAMP_PATTERN = re.compile(
     r"""
-    ^
     (
         \d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}      # ISO logs
         |
@@ -29,7 +38,15 @@ TIMESTAMP_PATTERN = re.compile(
     re.VERBOSE
 )
 
+
+# ---------------------------------------------------------
+# Log Reader
+# ---------------------------------------------------------
+
 class LogReader:
+
+    # ---------- Public API ----------
+
     def iter_records(
         self,
         file_path: Union[str, Path],
@@ -46,11 +63,14 @@ class LogReader:
     ) -> Iterator[RawRecord]:
         yield from self._iter_lines(text.splitlines(), source_file)
 
+    # ---------- Core Logic ----------
+
     def _iter_lines(
         self,
         lines: Iterable[str],
         source_file: Optional[str],
     ) -> Iterator[RawRecord]:
+
         buffer = []
 
         def flush():
@@ -73,6 +93,9 @@ class LogReader:
             if not line:
                 continue
 
+            # -------------------------------------------------
+            # 1. JSON logs (highest priority)
+            # -------------------------------------------------
             json_obj = self._try_parse_json(line)
             if json_obj is not None:
                 rec = flush()
@@ -86,6 +109,24 @@ class LogReader:
                 )
                 continue
 
+            # -------------------------------------------------
+            # 2. K8s Audit CSV (CRITICAL FIX)
+            # -------------------------------------------------
+            if self._looks_like_k8s_audit(line):
+                rec = flush()
+                if rec:
+                    yield rec
+
+                yield RawRecord(
+                    raw=line,
+                    json_obj=None,
+                    source_file=source_file,
+                )
+                continue
+
+            # -------------------------------------------------
+            # 3. Timestamp-based logs (multi-line support)
+            # -------------------------------------------------
             if TIMESTAMP_PATTERN.search(line):
                 rec = flush()
                 if rec:
@@ -93,14 +134,37 @@ class LogReader:
                 buffer = [line]
                 continue
 
+            # -------------------------------------------------
+            # 4. Continuation lines
+            # -------------------------------------------------
             if buffer:
                 buffer.append(line)
             else:
                 buffer = [line]
 
+        # flush remaining buffer
         rec = flush()
         if rec:
             yield rec
+
+    # ---------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------
+
+    def _looks_like_k8s_audit(self, line: str) -> bool:
+        """
+        Detect Kubernetes audit CSV logs.
+
+        These logs:
+        - have many comma-separated fields
+        - contain 'ResponseStarted' or 'ResponseComplete'
+        - contain 'system:' actor
+        """
+        return (
+            line.count(",") >= 10
+            and ("ResponseStarted" in line or "ResponseComplete" in line)
+            and "system:" in line
+        )
 
     @staticmethod
     def _try_parse_json(text: str) -> Optional[dict]:
@@ -108,12 +172,14 @@ class LogReader:
         if not text:
             return None
 
+        # direct JSON
         if text.startswith("{") and text.endswith("}"):
             try:
                 return json.loads(text)
             except Exception:
                 return None
 
+        # embedded JSON
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -125,10 +191,15 @@ class LogReader:
         return None
 
 
+# ---------------------------------------------------------
+# Directory / File Loader
+# ---------------------------------------------------------
+
 def iter_records_from_path(
     reader: LogReader,
     path: Union[str, Path],
 ) -> Iterator[RawRecord]:
+
     path = Path(path)
 
     if path.is_file():
@@ -136,6 +207,7 @@ def iter_records_from_path(
         return
 
     for file in sorted(path.iterdir()):
+
         if file.suffix == ".log":
             yield from reader.iter_records(file)
 

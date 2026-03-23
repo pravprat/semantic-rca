@@ -3,22 +3,18 @@
 from typing import Dict
 
 
-def build_cluster_signature(root: Dict) -> str:
+def build_signature(sem: Dict) -> str:
     """
-    Build deterministic signature for a root cause cluster.
+    Deterministic cluster signature
 
-    Signature format:
-
-        component:operation:resource:status
-
-    Example:
-        gatekeeper:list:assignmetadata:4xx
+    Format:
+        component:operation:resource:failure_mode
     """
 
-    component = root.get("component")
-    operation = root.get("dominant_operation")
-    resource = root.get("dominant_resource")
-    status = root.get("status_class")
+    component = sem.get("component")
+    operation = sem.get("operation")
+    resource = sem.get("resource")
+    failure_mode = sem.get("failure_mode")
 
     parts = []
 
@@ -31,8 +27,8 @@ def build_cluster_signature(root: Dict) -> str:
     if resource:
         parts.append(resource)
 
-    if status:
-        parts.append(status)
+    if failure_mode:
+        parts.append(failure_mode)
 
     if not parts:
         return "unknown_signature"
