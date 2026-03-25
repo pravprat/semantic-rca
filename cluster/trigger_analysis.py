@@ -1,6 +1,7 @@
 import json
 import math
 from collections import defaultdict
+from collections import Counter
 from datetime import datetime
 
 
@@ -65,7 +66,8 @@ def run_trigger_analysis(
     cluster_times = defaultdict(list)
 
     # ✅ NEW
-    cluster_actors = defaultdict(set)
+    cluster_actors = defaultdict(Counter)
+    cluster_resources = defaultdict(Counter)
 
     for e in events:
 
@@ -113,7 +115,11 @@ def run_trigger_analysis(
         # ------------------------
         actor = e.get("actor") or e.get("service")
         if actor:
-            cluster_actors[cid].add(actor)
+            cluster_actors[cid][actor] += 1
+
+        resource = e.get("resource")
+        if resource:
+            cluster_resources[cid][resource] += 1
 
     # -------------------------------------
     # Compute trigger metrics
@@ -178,8 +184,16 @@ def run_trigger_analysis(
         # ✅ NEW: systemic spread (actor diversity)
         # -------------------------------------
 
-        actor_div = len(cluster_actors[cid])
+        actor_div = len(cluster_actors[cid].keys())
         spread = min(1.0, actor_div / 3.0)
+
+        dominant_actor = None
+        if cluster_actors[cid]:
+            dominant_actor = cluster_actors[cid].most_common(1)[0][0]
+
+        dominant_resource = None
+        if cluster_resources[cid]:
+            dominant_resource = cluster_resources[cid].most_common(1)[0][0]
 
         # -------------------------------------
         # ✅ Adjust trigger score (light modulation)
@@ -224,6 +238,8 @@ def run_trigger_analysis(
             "scale": round(scale, 6),
             "actor_diversity": actor_div,
             "systemic_spread": round(spread, 6),
+            "actor": dominant_actor,
+            "resource": dominant_resource,
 
         }
 
