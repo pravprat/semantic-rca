@@ -63,6 +63,7 @@ def run_trigger_analysis(
 
     cluster_event_count = defaultdict(int)
     cluster_error_count = defaultdict(int)
+    cluster_fallback_error_count = defaultdict(int)
     cluster_times = defaultdict(list)
 
     # ✅ NEW
@@ -97,8 +98,19 @@ def run_trigger_analysis(
         except Exception:
             rc = 0
 
+        used_http_failure = False
         if rc >= 400:
             cluster_error_count[cid] += 1
+            used_http_failure = True
+
+        # Non-HTTP fallback signal for text-heavy logs.
+        if not used_http_failure:
+            sev = str(e.get("severity") or "").upper()
+            status_family = str(e.get("status_family") or "").lower()
+            failure_hint = e.get("failure_hint")
+            if sev in {"ERROR", "FATAL"} or status_family == "failure" or failure_hint:
+                cluster_error_count[cid] += 1
+                cluster_fallback_error_count[cid] += 1
 
         # ------------------------
         # Timestamp
@@ -217,6 +229,7 @@ def run_trigger_analysis(
 
             "event_count": n,
             "error_count": errors,
+            "fallback_error_count": cluster_fallback_error_count.get(cid, 0),
 
             "duration_seconds": duration,
 

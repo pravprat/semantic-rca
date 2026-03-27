@@ -51,6 +51,9 @@ def run_embedding(
             "resource": e.get("resource"),
             "response_code": e.get("response_code"),
             "http_class": e.get("http_class"),
+            "status_family": e.get("status_family"),
+            "failure_hint": e.get("failure_hint"),
+            "path": e.get("path"),
 
             # structured signal
             "stage": e.get("stage"),
