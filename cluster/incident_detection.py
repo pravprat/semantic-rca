@@ -23,6 +23,7 @@ def run_incident_detection(
     output_path: str,
     gap_seconds: int = 30,
     max_seeds: int = 3,
+    status_output_path: str | None = None,
 ):
 
     # -------------------------------
@@ -55,7 +56,22 @@ def run_incident_detection(
         })
 
     if not triggers:
-        raise RuntimeError("[incident_detection] No trigger clusters found")
+        output: List[Dict[str, Any]] = []
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2)
+
+        if status_output_path:
+            status = {
+                "status": "no_incident",
+                "reason": "no_trigger_clusters",
+                "candidate_clusters": 0,
+                "incidents_count": 0,
+            }
+            with open(status_output_path, "w", encoding="utf-8") as f:
+                json.dump(status, f, indent=2)
+
+        print("[incident_detection] no trigger clusters found -> wrote empty incidents.json")
+        return output
 
     # -------------------------------
     # Step 2: Sort by time
@@ -131,4 +147,15 @@ def run_incident_detection(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
 
+    if status_output_path:
+        status = {
+            "status": "incident_detected",
+            "reason": "trigger_clusters_found",
+            "candidate_clusters": len(triggers),
+            "incidents_count": len(output),
+        }
+        with open(status_output_path, "w", encoding="utf-8") as f:
+            json.dump(status, f, indent=2)
+
     print(f"[incident_detection] incidents={len(output)} -> {output_path}")
+    return output
