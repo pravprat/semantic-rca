@@ -13,7 +13,7 @@ It reflects:
 
 ## 2) Current Baseline (Validated)
 
-Current pipeline score on K8s audit input: **89/100**
+Current pipeline score on K8s audit input: **90/100**
 
 Validated strengths:
 - End-to-end artifact generation is stable.
@@ -42,6 +42,8 @@ Known constraint:
 5. Incident detection
 6. Causal analysis
 7. RCA reporting
+8. Evidence bundle generation
+9. Detailed RCA reporting (support-first + technical appendix)
 
 Core outputs:
 - Causal graph
@@ -68,6 +70,10 @@ Primary outputs:
 - `outputs/incident_root_events.json`
 - `outputs/incident_rca_report.json`
 - `outputs/incident_rca_report.md`
+- `outputs/incident_evidence_bundle.json`
+- `outputs/incident_rca_report_detailed.json`
+- `outputs/incident_rca_report_detailed.md`
+- `outputs/scorecard.json`
 - `outputs/clusters_stats.json` (coverage/clustering stats)
 
 Required operational invariants:
@@ -76,6 +82,8 @@ Required operational invariants:
 - All mapped cluster IDs must exist in `clusters.json`.
 - Incident IDs must align across incidents/graph/candidates/roots/report outputs.
 - Rooted events should represent failure-class evidence (`response_code >= 400` where available).
+- Evidence bundle must include anomaly onset (`first_anomaly_timestamp`, `first_anomaly_event_id`).
+- Detailed report must include support narrative and detection timeline.
 
 
 ## 5) Source-Specific Ingestion Strategy
@@ -138,6 +146,8 @@ Recommended quality gates per run:
 - Incident artifact alignment = 100%
 - Non-failure rooted events = 0
 - Null actor/resource in graph nodes = 0
+- Evidence bundle anomaly-onset completeness = 100%
+- Detailed report support sections present = 100%
 
 
 ## 7) Stage Extensions for Forensic RCA
@@ -151,8 +161,25 @@ Bundle content:
 - Event IDs and cluster lineage
 - Temporal ordering proofs
 - Why-selected metadata for top candidates
+- Anomaly onset details (`first_anomaly_timestamp`, `first_anomaly_event_id`, `detection_rule`, `delta_to_primary_seconds`)
 
-### Stage 9: Assertion Engine
+### Stage 9: Detailed RCA Reporting
+New artifact:
+- `outputs/incident_rca_report_detailed.json`
+- `outputs/incident_rca_report_detailed.md` (optional for machine-only mode)
+
+Detailed report structure:
+- Support-facing narrative:
+  - Incident narrative
+  - Support impact summary
+  - Detection timeline (first anomaly and delta to primary root event)
+  - Suggested next actions
+- Supplemental technical appendix:
+  - Pattern ID
+  - Primary cluster/event IDs
+  - Causal edge counts and confidence labels
+
+### Stage 10: Assertion Engine
 New artifact:
 - `outputs/incident_assertions.json`
 
@@ -161,7 +188,7 @@ Assertion examples:
 - Candidate has positive causal influence (out > in strength).
 - Top candidate confidence exceeds minimum gate.
 
-### Stage 10: Attribution Layer
+### Stage 11: Attribution Layer
 New artifact:
 - `outputs/incident_attribution.json`
 
@@ -213,7 +240,7 @@ Required implementation assets:
 ## 11) Success Criteria (Program-Level)
 
 Short term (v1.5 baseline):
-- Preserve K8s score >= 89/100 while adding forensic artifacts.
+- Preserve K8s score >= 90/100 while adding forensic artifacts.
 - NetApp ingestion parse success >= 99%.
 - NetApp run score >= 82/100 initial target.
 

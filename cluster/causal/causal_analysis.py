@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from datetime import datetime
 
 from cluster.causal.core.candidate_extractor import extract_candidates
 from cluster.causal.core.graph_builder import infer_edges
@@ -57,6 +58,23 @@ class EventResolver:
         self.event_cluster_map = event_cluster_map
         self.events = events
 
+    @staticmethod
+    def _parse_ts(ts: Any) -> datetime | None:
+        if not isinstance(ts, str) or not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_failure_event(ev: Dict[str, Any]) -> bool:
+        rc = ev.get("response_code")
+        try:
+            return rc is not None and int(rc) >= 400
+        except Exception:
+            return False
+
     def resolve(
         self,
         incident: Dict[str, Any],
@@ -71,16 +89,24 @@ class EventResolver:
             eid = e.get("event_id")
             cid = self.event_cluster_map.get(eid)
 
-            if cid in candidate_clusters:
+            if cid in candidate_clusters and self._is_failure_event(e):
                 cluster_to_events.setdefault(cid, []).append(e)
 
         results = []
 
         for cid in candidate_clusters:
             evs = cluster_to_events.get(cid, [])
+            if not evs:
+                continue
 
-            # sort by timestamp
-            evs_sorted = sorted(evs, key=lambda x: x.get("timestamp"))
+            # sort by parsed timestamp safely; non-parseable timestamps sink last
+            evs_sorted = sorted(
+                evs,
+                key=lambda x: (
+                    self._parse_ts(x.get("timestamp")) is None,
+                    self._parse_ts(x.get("timestamp")) or datetime.max,
+                ),
+            )
 
             for i, ev in enumerate(evs_sorted[:top_k_per_cluster]):
                 results.append({

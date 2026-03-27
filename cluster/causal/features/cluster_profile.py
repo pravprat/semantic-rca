@@ -10,6 +10,36 @@ from cluster.causal.utils.time_utils import parse_ts
 from cluster.causal.domain.failure_domain_inferer import infer_failure_domain
 
 
+def _fallback_resource(ev: Dict[str, Any]) -> str | None:
+    resource = ev.get("resource")
+    if resource:
+        return resource
+
+    sem = ev.get("semantic") or {}
+    if sem.get("resource"):
+        return sem.get("resource")
+
+    structured = ev.get("structured_fields") or {}
+    if structured.get("resource"):
+        return structured.get("resource")
+
+    path = ev.get("path")
+    if isinstance(path, str) and path:
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            return parts[-1]
+
+    return None
+
+
+def _fallback_actor(ev: Dict[str, Any]) -> str | None:
+    actor = ev.get("actor") or ev.get("service")
+    if actor:
+        return actor
+    sem = ev.get("semantic") or {}
+    return sem.get("actor")
+
+
 def build_cluster_profiles(
     incident: Dict[str, Any],
     cluster_trigger_stats: Dict[str, Any],
@@ -52,8 +82,8 @@ def build_cluster_profiles(
             actor_counts = Counter()
             resource_counts = Counter()
             for ev in cluster_events:
-                a = ev.get("actor") or ev.get("service")
-                r = ev.get("resource")
+                a = _fallback_actor(ev)
+                r = _fallback_resource(ev)
                 if a:
                     actor_counts[a] += 1
                 if r:
@@ -63,6 +93,11 @@ def build_cluster_profiles(
                 actor = actor_counts.most_common(1)[0][0]
             if not resource and resource_counts:
                 resource = resource_counts.most_common(1)[0][0]
+
+        if not actor:
+            actor = "unknown_actor"
+        if not resource:
+            resource = "unknown_resource"
 
         profiles[cid] = ClusterProfile(
             cluster_id=cid,

@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from datetime import datetime
 
 
 def _load_json(path: Path) -> Any:
@@ -41,6 +42,48 @@ def _pick_chain_edges(top_cluster: str, graph_item: Dict[str, Any], max_edges: i
     edges = [e for e in graph_item.get("edges", []) if e.get("source") == top_cluster]
     edges.sort(key=lambda x: (_safe_float(x.get("lag_seconds"), 1e9), -_safe_float(x.get("score"), 0.0)))
     return edges[:max_edges]
+
+
+def _parse_ts(ts: Any) -> datetime | None:
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _compute_anomaly_onset(
+    root_events: List[Dict[str, Any]],
+    primary_event: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    anomalous: List[Dict[str, Any]] = []
+    for ev in root_events:
+        rc = ev.get("response_code")
+        try:
+            if rc is not None and int(rc) >= 400:
+                anomalous.append(ev)
+        except Exception:
+            continue
+
+    anomalous.sort(key=lambda e: (_parse_ts(e.get("timestamp")) is None, _parse_ts(e.get("timestamp"))))
+    first = anomalous[0] if anomalous else None
+
+    delta_to_primary_seconds = None
+    if first and primary_event:
+        t1 = _parse_ts(first.get("timestamp"))
+        t2 = _parse_ts(primary_event.get("timestamp"))
+        if t1 and t2:
+            delta_to_primary_seconds = round((t2 - t1).total_seconds(), 3)
+
+    return {
+        "detection_rule": "first_failure_response_code_gte_400",
+        "first_anomaly_timestamp": (first or {}).get("timestamp"),
+        "first_anomaly_event_id": (first or {}).get("event_id"),
+        "first_anomaly_cluster_id": (first or {}).get("cluster_id"),
+        "first_anomaly_response_code": (first or {}).get("response_code"),
+        "delta_to_primary_seconds": delta_to_primary_seconds,
+    }
 
 
 def build_evidence_bundle(
@@ -80,8 +123,6 @@ def build_evidence_bundle(
         top_cluster = top.get("cluster_id")
 
         node_map = _cluster_node_map(graph_item)
-        edge_idx = _cluster_edge_index(graph_item)
-
         primary_event = None
         for ev in root_events:
             if ev.get("reason") == "earliest_failure":
@@ -155,6 +196,7 @@ def build_evidence_bundle(
         coverage["coverage_pct"] = round(
             100.0 * coverage["claims_with_evidence"] / max(1, coverage["claims_total"]), 2
         )
+        anomaly_onset = _compute_anomaly_onset(root_events, primary_event)
 
         bundle = {
             "incident_id": iid,
@@ -168,6 +210,7 @@ def build_evidence_bundle(
             },
             "claims": [claim],
             "coverage": coverage,
+            "anomaly_onset": anomaly_onset,
             "chain_summary": {
                 "top_cluster": top_cluster,
                 "direct_downstream_edges": len(chain),

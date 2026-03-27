@@ -68,6 +68,10 @@ FAILURE_HINT_PATTERNS = [
     (re.compile(r"\bexceeded\b", re.IGNORECASE), "threshold_exceeded"),
     (re.compile(r"\bexception\b", re.IGNORECASE), "exception"),
     (re.compile(r"\bpanic\b", re.IGNORECASE), "panic"),
+    (re.compile(r"\bforbidden\b", re.IGNORECASE), "forbidden"),
+    (re.compile(r"\bunauthorized\b", re.IGNORECASE), "unauthorized"),
+    (re.compile(r"\baccess\s+denied\b", re.IGNORECASE), "access_denied"),
+    (re.compile(r"\bpermission\s+denied\b", re.IGNORECASE), "permission_denied"),
     (re.compile(r"\bfailed\b", re.IGNORECASE), "failed"),
 ]
 
@@ -126,6 +130,18 @@ class Eventizer:
         return None
 
     @staticmethod
+    def _coerce_http_code(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            code = int(str(value).strip())
+            if 100 <= code <= 599:
+                return code
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _extract_path_from_text(text: str) -> Optional[str]:
         if not text:
             return None
@@ -172,7 +188,11 @@ class Eventizer:
     @staticmethod
     def parse_all_logs_record(raw: str, obj: Dict[str, Any]) -> Dict[str, Any]:
         outer = Eventizer._parse_wrapped_outer(raw)
-        payload = (outer or {}).get("payload") or obj or {}
+        # Critical guard: only map wrapped formats here.
+        # Plain JSON audit records must flow to parse_k8s_audit_json().
+        if not outer:
+            return {}
+        payload = outer.get("payload") or {}
         if not isinstance(payload, dict):
             return {}
 
@@ -243,34 +263,32 @@ class Eventizer:
         if stream:
             out["stage"] = str(stream).lower()
 
-        code = payload.get("statusCode")
-        if isinstance(code, int):
-            out["response_code"] = code
-            out["http_class"] = f"{code // 100}xx"
-        else:
+        code = (
+            Eventizer._coerce_http_code(payload.get("statusCode"))
+            or Eventizer._coerce_http_code(payload.get("status"))
+            or Eventizer._coerce_http_code(payload.get("status_code"))
+            or Eventizer._coerce_http_code(payload.get("code"))
+        )
+        if code is None and isinstance(payload.get("responseStatus"), dict):
+            code = Eventizer._coerce_http_code(payload.get("responseStatus", {}).get("code"))
+        if code is None and isinstance(payload.get("response"), dict):
+            code = (
+                Eventizer._coerce_http_code(payload.get("response", {}).get("status"))
+                or Eventizer._coerce_http_code(payload.get("response", {}).get("code"))
+            )
+        if code is None:
             # ASUP errors sometimes include status only in free-text error details.
             err_text = f"{payload.get('error') or ''} {payload.get('msg') or ''} {payload.get('log') or ''}"
-            parsed_code = Eventizer._extract_status_from_text(err_text)
-            if parsed_code is not None:
-                out["response_code"] = parsed_code
-                out["http_class"] = f"{parsed_code // 100}xx"
+            code = Eventizer._extract_status_from_text(err_text)
+        if code is not None:
+            out["response_code"] = code
+            out["http_class"] = f"{code // 100}xx"
 
         # Non-HTTP fallback signal for incident detection in text-heavy logs.
         msg_text = f"{payload.get('error') or ''} {payload.get('msg') or ''} {payload.get('log') or ''}"
         failure_hint = Eventizer._extract_failure_hint(msg_text)
         if failure_hint:
             out["failure_hint"] = failure_hint
-
-        if out.get("http_class"):
-            out["status_family"] = "failure" if out["http_class"] in {"4xx", "5xx"} else "normal"
-        else:
-            sev_hint = out.get("severity_hint")
-            if sev_hint in {"ERROR", "FATAL"} or failure_hint:
-                out["status_family"] = "failure"
-            elif sev_hint == "WARN":
-                out["status_family"] = "warning"
-            else:
-                out["status_family"] = "unknown"
 
         sev = payload.get("s")
         if isinstance(sev, str):
@@ -288,6 +306,17 @@ class Eventizer:
             lvl = str(payload.get("level")).upper()
             if lvl in {"FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"}:
                 out["severity_hint"] = lvl
+
+        if out.get("http_class"):
+            out["status_family"] = "failure" if out["http_class"] in {"4xx", "5xx"} else "normal"
+        else:
+            sev_hint = out.get("severity_hint")
+            if sev_hint in {"ERROR", "FATAL"} or failure_hint:
+                out["status_family"] = "failure"
+            elif sev_hint == "WARN":
+                out["status_family"] = "warning"
+            else:
+                out["status_family"] = "unknown"
 
         out["source_subtype"] = (outer or {}).get("source_subtype") or "wrapped.logs"
         out["inner_type"] = Eventizer._detect_inner_type(payload)

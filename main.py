@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 # ------------------------------------------------------------
@@ -48,6 +50,8 @@ PATHS = {
     "incident_detection_status": OUTPUT_DIR / "incident_detection_status.json",
     "preincident_json": OUTPUT_DIR / "preincident_diagnostics.json",
     "preincident_md": OUTPUT_DIR / "preincident_diagnostics.md",
+    "validation_json": OUTPUT_DIR / "validation_report.json",
+    "validation_md": OUTPUT_DIR / "validation_report.md",
 }
 
 # ------------------------------------------------------------
@@ -123,6 +127,21 @@ def cmd_incident_detection(args):
         status_output_path=str(PATHS["incident_detection_status"]),
     )
     return out
+
+
+def cmd_validate_outputs(args) -> bool:
+    """Run external validation script and write reports."""
+    validation_script = PROJECT_ROOT / "validation" / "validate_pipeline_steps.py"
+    outputs_dir = Path(getattr(args, "outputs_dir", OUTPUT_DIR))
+    raw_log_arg = getattr(args, "raw_log", None)
+    cmd = [sys.executable, str(validation_script), "--outputs-dir", str(outputs_dir)]
+    if raw_log_arg:
+        cmd.extend(["--raw-log", str(raw_log_arg)])
+    if getattr(args, "compat_v142", False):
+        cmd.append("--compat-v142")
+    cmd.extend(["--report-json", str(PATHS["validation_json"]), "--report-md", str(PATHS["validation_md"])])
+    rc = subprocess.run(cmd, check=False).returncode
+    return rc == 0
 
 # ------------------------------------------------------------
 # Step 6: Causal Inference + Root Identification
@@ -239,7 +258,6 @@ def cmd_detailed_report(args):
 # ------------------------------------------------------------
 
 from tools.build_incident_assertions import build_assertions
-from tools.build_incident_timeline_plot import build_incident_timeline_plot
 
 def cmd_incident_assertions(args):
     """
@@ -255,27 +273,6 @@ def cmd_incident_assertions(args):
         output_path=PATHS["assertions"],
     )
     print(f"[STEP 10] incident assertions complete (incidents={len(out)})")
-
-# ------------------------------------------------------------
-# Step 11: Interactive incident timeline
-# ------------------------------------------------------------
-
-def cmd_incident_timeline(args):
-    """
-    Step 11:
-    - Build interactive incident timeline output(s) and shape labels.
-    """
-    print("\n[STEP 11] building interactive incident timeline output(s)")
-    summaries = build_incident_timeline_plot(
-        events_path=PATHS["events"],
-        incidents_path=PATHS["incidents"],
-        out_dir=OUTPUT_DIR,
-        bucket_minutes=getattr(args, "bucket_minutes", 1),
-    )
-    with PATHS["timeline_summary"].open("w", encoding="utf-8") as f:
-        import json
-        json.dump(summaries, f, ensure_ascii=False, indent=2)
-    print(f"[STEP 11] complete (incidents={len(summaries)}) -> {PATHS['timeline_summary']}")
 
 # ------------------------------------------------------------
 # Diagnostics (no-incident helper)
@@ -303,7 +300,6 @@ PIPELINE_STEPS = [
     ("STEP 8", "evidence_bundle", cmd_evidence_bundle),
     ("STEP 9", "detailed_report", cmd_detailed_report),
     ("STEP 10", "incident_assertions", cmd_incident_assertions),
-    ("STEP 11", "incident_timeline", cmd_incident_timeline),
 ]
 
 def cmd_all(args):
@@ -334,12 +330,20 @@ def cmd_all(args):
             if not incidents:
                 print("\n[PIPELINE] no incidents detected, generating pre-incident diagnostics")
                 cmd_preincident_diagnostics(args)
+                print("\n[PIPELINE] running post-run validation")
+                args.outputs_dir = OUTPUT_DIR
+                args.raw_log = args.logfile
+                cmd_validate_outputs(args)
                 print("[PIPELINE] stopping after diagnostics (no incident path)")
                 print(f"Outputs available at: {OUTPUT_DIR}")
                 return
 
     print("\n🎉 Pipeline complete")
     print(f"Outputs available at: {OUTPUT_DIR}")
+    print("\n[PIPELINE] running post-run validation")
+    args.outputs_dir = OUTPUT_DIR
+    args.raw_log = args.logfile
+    cmd_validate_outputs(args)
 
 
 # ------------------------------------------------------------
@@ -405,18 +409,24 @@ def build_parser():
     )
     assertions.set_defaults(func=cmd_incident_assertions)
 
-    timeline = sub.add_parser(
-        "incident_timeline",
-        help="Step 11: Generate interactive incident timeline outputs"
-    )
-    timeline.add_argument("--bucket-minutes", type=int, default=1)
-    timeline.set_defaults(func=cmd_incident_timeline)
-
     prediag = sub.add_parser(
         "preincident_diagnostics",
         help="Build diagnostics when incidents are not detected"
     )
     prediag.set_defaults(func=cmd_preincident_diagnostics)
+
+    validate = sub.add_parser(
+        "validate",
+        help="Run QA validation checks on output artifacts"
+    )
+    validate.add_argument("--outputs-dir", default=str(OUTPUT_DIR))
+    validate.add_argument("--raw-log", default=None)
+    validate.add_argument(
+        "--compat-v142",
+        action="store_true",
+        help="Compatibility mode for v1.4.2-style outputs (status/timeline optional).",
+    )
+    validate.set_defaults(func=cmd_validate_outputs)
 
     # full pipeline
     allp = sub.add_parser(
@@ -434,7 +444,6 @@ def build_parser():
         action="store_true",
         help="Clean outputs directory before running pipeline"
     )
-
     return p
 
 def main():
