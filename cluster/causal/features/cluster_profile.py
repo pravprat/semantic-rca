@@ -3,10 +3,41 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+from collections import Counter
 
 from cluster.causal.models.cluster_profile_model import ClusterProfile
 from cluster.causal.utils.time_utils import parse_ts
 from cluster.causal.domain.failure_domain_inferer import infer_failure_domain
+
+
+def _fallback_resource(ev: Dict[str, Any]) -> str | None:
+    resource = ev.get("resource")
+    if resource:
+        return resource
+
+    sem = ev.get("semantic") or {}
+    if sem.get("resource"):
+        return sem.get("resource")
+
+    structured = ev.get("structured_fields") or {}
+    if structured.get("resource"):
+        return structured.get("resource")
+
+    path = ev.get("path")
+    if isinstance(path, str) and path:
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            return parts[-1]
+
+    return None
+
+
+def _fallback_actor(ev: Dict[str, Any]) -> str | None:
+    actor = ev.get("actor") or ev.get("service")
+    if actor:
+        return actor
+    sem = ev.get("semantic") or {}
+    return sem.get("actor")
 
 
 def build_cluster_profiles(
@@ -44,6 +75,30 @@ def build_cluster_profiles(
         # ------------------------------------------------------
         # Build profile
         # ------------------------------------------------------
+        actor = s.get("actor")
+        resource = s.get("resource")
+
+        if not actor or not resource:
+            actor_counts = Counter()
+            resource_counts = Counter()
+            for ev in cluster_events:
+                a = _fallback_actor(ev)
+                r = _fallback_resource(ev)
+                if a:
+                    actor_counts[a] += 1
+                if r:
+                    resource_counts[r] += 1
+
+            if not actor and actor_counts:
+                actor = actor_counts.most_common(1)[0][0]
+            if not resource and resource_counts:
+                resource = resource_counts.most_common(1)[0][0]
+
+        if not actor:
+            actor = "unknown_actor"
+        if not resource:
+            resource = "unknown_resource"
+
         profiles[cid] = ClusterProfile(
             cluster_id=cid,
             first_seen=first_seen,
@@ -53,8 +108,8 @@ def build_cluster_profiles(
             error_rate=float(s.get("error_rate", 0.0)),
             severity=float(s.get("severity", 0.0)),
             systemic_spread=float(s.get("systemic_spread", 0.0)),
-            actor=s.get("actor"),
-            resource=s.get("resource"),
+            actor=actor,
+            resource=resource,
             failure_domain=failure_domain,   # ✅ FIXED
         )
 

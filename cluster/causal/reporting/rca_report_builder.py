@@ -9,6 +9,7 @@ from cluster.causal.reporting.explanation_builder import build_explanation
 from cluster.causal.reporting.pattern_classifier import classify_failure_pattern
 from cluster.causal.reporting.root_summary import build_root_cause_summary
 from cluster.causal.utils.io_utils import load_json, write_json
+from cluster.causal.reporting.blast_radius import compute_blast_radius
 
 
 def _group_root_events_by_incident(root_events_data: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -74,6 +75,13 @@ def build_rca_report(
             root_events=root_events,
         )
 
+        blast_radius = compute_blast_radius(
+            profiles=None,  # optional for now
+            root_events=root_events,
+            pattern_info=pattern_info,
+            incident=incident,
+        )
+
         reports.append({
             "incident_id": incident_id,
             "incident_window": {
@@ -84,6 +92,7 @@ def build_rca_report(
             "root_cause_summary": summary["root_cause"],
             "explanation": explanation["summary"],
             "evidence": explanation["evidence"],
+            "blast_radius": blast_radius,
             "confidence": confidence,
             "top_candidates": candidates[:5],
         })

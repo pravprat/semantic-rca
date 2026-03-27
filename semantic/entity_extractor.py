@@ -29,7 +29,7 @@ def infer_status_class(code) -> str:
 # Failure mode (IMPORTANT)
 # ---------------------------------------------------------
 
-def infer_failure_mode(status_class: str, code: int) -> str:
+def infer_failure_mode(status_class: str, code: int, status_family: str = "unknown", failure_hint: str | None = None) -> str:
 
     if status_class == "5xx":
         return "service_failure"
@@ -44,6 +44,13 @@ def infer_failure_mode(status_class: str, code: int) -> str:
 
         return "client_error"
 
+    if status_family == "failure":
+        if failure_hint in {"timeout", "connection_refused", "connection_reset", "network_unreachable"}:
+            return "dependency_failure"
+        if failure_hint in {"rpc_error", "exception", "panic", "failed", "threshold_exceeded"}:
+            return "service_failure"
+        return "service_failure"
+
     return "normal"
 
 
@@ -57,11 +64,13 @@ def extract_event_semantics(event: Dict[str, Any]) -> Dict[str, Any]:
     verb = event.get("verb")
     resource = event.get("resource")
     code = event.get("response_code")
+    status_family = event.get("status_family") or "unknown"
+    failure_hint = event.get("failure_hint")
 
     raw_text = event.get("raw_text") or ""
 
     status_class = infer_status_class(code)
-    failure_mode = infer_failure_mode(status_class, code)
+    failure_mode = infer_failure_mode(status_class, code, status_family=status_family, failure_hint=failure_hint)
 
     component, domain = resolve_component(actor, raw_text)
 

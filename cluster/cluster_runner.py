@@ -18,7 +18,8 @@ def tag_cluster_type(cluster_size: int, total_events: int) -> str:
     if fraction >= 0.20:
         return "baseline"
     elif fraction <= 0.05:
-        return "candidate"
+        # Structural size class only; trigger stage decides candidates.
+        return "minor_pattern"
     else:
         return "contextual"
 
@@ -118,5 +119,24 @@ def run_clustering(
     with open(event_cluster_map_output_path, "w", encoding="utf-8") as f:
         json.dump(event_cluster_map, f, ensure_ascii=False, indent=2)
 
+    mapped_events = len(event_cluster_map)
+    unmapped_events = max(0, total_events - mapped_events)
+    coverage = (mapped_events / max(total_events, 1)) * 100.0
+
+    clustering_stats = {
+        "total_events": total_events,
+        "clustered_events": mapped_events,
+        "unmapped_events": unmapped_events,
+        "cluster_coverage_pct": round(coverage, 4),
+        "cluster_count": len(clusters_out),
+    }
+    stats_output_path = clusters_output_path.replace(".json", "_stats.json")
+    with open(stats_output_path, "w", encoding="utf-8") as f:
+        json.dump(clustering_stats, f, ensure_ascii=False, indent=2)
+
     print(f"[cluster] clusters={len(clusters_out)} -> {clusters_output_path}")
     print(f"[cluster] event_cluster_map size={len(event_cluster_map)} -> {event_cluster_map_output_path}")
+    print(
+        f"[cluster] clustered={mapped_events}/{total_events} "
+        f"({coverage:.2f}%), unmapped={unmapped_events} -> {stats_output_path}"
+    )

@@ -1,6 +1,7 @@
 import json
 import math
 from collections import defaultdict
+from collections import Counter
 from datetime import datetime
 
 
@@ -62,10 +63,12 @@ def run_trigger_analysis(
 
     cluster_event_count = defaultdict(int)
     cluster_error_count = defaultdict(int)
+    cluster_fallback_error_count = defaultdict(int)
     cluster_times = defaultdict(list)
 
     # ✅ NEW
-    cluster_actors = defaultdict(set)
+    cluster_actors = defaultdict(Counter)
+    cluster_resources = defaultdict(Counter)
 
     for e in events:
 
@@ -95,8 +98,19 @@ def run_trigger_analysis(
         except Exception:
             rc = 0
 
+        used_http_failure = False
         if rc >= 400:
             cluster_error_count[cid] += 1
+            used_http_failure = True
+
+        # Non-HTTP fallback signal for text-heavy logs.
+        if not used_http_failure:
+            sev = str(e.get("severity") or "").upper()
+            status_family = str(e.get("status_family") or "").lower()
+            failure_hint = e.get("failure_hint")
+            if sev in {"ERROR", "FATAL"} or status_family == "failure" or failure_hint:
+                cluster_error_count[cid] += 1
+                cluster_fallback_error_count[cid] += 1
 
         # ------------------------
         # Timestamp
@@ -113,7 +127,11 @@ def run_trigger_analysis(
         # ------------------------
         actor = e.get("actor") or e.get("service")
         if actor:
-            cluster_actors[cid].add(actor)
+            cluster_actors[cid][actor] += 1
+
+        resource = e.get("resource")
+        if resource:
+            cluster_resources[cid][resource] += 1
 
     # -------------------------------------
     # Compute trigger metrics
@@ -178,8 +196,16 @@ def run_trigger_analysis(
         # ✅ NEW: systemic spread (actor diversity)
         # -------------------------------------
 
-        actor_div = len(cluster_actors[cid])
+        actor_div = len(cluster_actors[cid].keys())
         spread = min(1.0, actor_div / 3.0)
+
+        dominant_actor = None
+        if cluster_actors[cid]:
+            dominant_actor = cluster_actors[cid].most_common(1)[0][0]
+
+        dominant_resource = None
+        if cluster_resources[cid]:
+            dominant_resource = cluster_resources[cid].most_common(1)[0][0]
 
         # -------------------------------------
         # ✅ Adjust trigger score (light modulation)
@@ -203,6 +229,7 @@ def run_trigger_analysis(
 
             "event_count": n,
             "error_count": errors,
+            "fallback_error_count": cluster_fallback_error_count.get(cid, 0),
 
             "duration_seconds": duration,
 
@@ -224,6 +251,8 @@ def run_trigger_analysis(
             "scale": round(scale, 6),
             "actor_diversity": actor_div,
             "systemic_spread": round(spread, 6),
+            "actor": dominant_actor,
+            "resource": dominant_resource,
 
         }
 
