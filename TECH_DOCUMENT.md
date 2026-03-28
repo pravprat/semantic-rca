@@ -251,3 +251,69 @@ Medium term:
 Long term:
 - Feedback loop improves attribution precision release-over-release.
 
+
+## 12) Release Progress Through v1.4.4
+
+### v1.4.2 (Stability Baseline)
+
+Delivered:
+- Stable causal inference and grounded root-event selection.
+- Deterministic artifact chain from ingestion to RCA report.
+- Reliable root-cause pattern classification baseline.
+
+Operational value:
+- Established a stable base for forensic and support-oriented extensions.
+
+### v1.4.3 (Validation and Reliability Hardening)
+
+Delivered:
+- Expanded stage-wise validation and artifact contract checks.
+- Improved handling for sparse HTTP code scenarios via fallback failure signals.
+- Better no-incident and diagnostics path behavior.
+
+Operational value:
+- Reduced brittle pipeline behavior and improved run trust for operators.
+
+### v1.4.4 (Forensic Support Readability + Parser/Registry Upgrades)
+
+Delivered:
+- Post-root impact timeline enriched with:
+  - status-class counts
+  - failure domain/component/service/resource breakdowns
+  - pre/post degradation metrics
+- Explicit downstream dependency impact extraction:
+  - source service -> target dependency service
+  - count, first-seen timestamp
+  - target domain/system/owner hints for support routing
+- Status class semantics correction:
+  - `null` for missing response code
+  - `unknown` only for non-null unclassifiable values
+- Parser quality improvement:
+  - actor sanitization to suppress code-path/function-like actor noise
+- Validation policy update:
+  - Step 11 remains visible but optional in overall release pass by default
+- Component registry hardening:
+  - added `dcn_manager`/`dcn_mgr` aliases
+  - added `rke2-server`, `rke2-agent`
+  - removed ambiguous bare `manager` mapping
+
+Operational value:
+- Reports now communicate "what broke what" at component/service/system level.
+- Support engineers can map incidents to likely owning teams faster.
+
+### Verified Run Snapshot (v1.4.4)
+
+- Overall validation status: `PASS` (release-gated steps)
+- Events processed: `67824`
+- Incident decision: `incident_detected` (`incidents_count=1`)
+- Root candidate confidence: high (`0.90813`)
+- Assertions: `4 pass, 0 fail, 0 inconclusive`
+- Dependency impact observed:
+  - `kube-apiserver -> aide-system-milvus-operator-webhook-service` (`count=2380`)
+
+### Companion Documents
+
+- Run scorecard: `reports/RUN_VERIFICATION_SCORECARD_v1.4.4.md`
+- Release notes: `reports/RELEASE_NOTES_v1.4.2_to_v1.4.4.md`
+- all.logs maturity plan: `reports/ALL_LOGS_MATURITY_IMPROVEMENT_PLAN.md`
+

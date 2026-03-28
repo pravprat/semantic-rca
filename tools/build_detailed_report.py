@@ -79,6 +79,7 @@ def build_detailed_report_json(
             "claims": bundle.get("claims", []),
             "chain_summary": bundle.get("chain_summary", {}),
             "anomaly_onset": bundle.get("anomaly_onset", {}),
+            "post_anomaly_impacts": bundle.get("post_anomaly_impacts", {}),
             "lineage": bundle.get("lineage", {}),
         }
         detailed.append(entry)
@@ -146,6 +147,85 @@ def render_detailed_markdown(
         lines.append(f"- **First anomaly event ID:** {onset.get('first_anomaly_event_id')}")
         lines.append(f"- **Detection rule:** {onset.get('detection_rule')}")
         lines.append(f"- **Delta to primary root event:** {onset.get('delta_to_primary_seconds')} seconds\n")
+
+        impacts = forensic.get("post_anomaly_impacts", {})
+        lines.append("## Post-Root Impact Timeline\n")
+        lines.append(f"- **Window start (t0):** {impacts.get('window_start')}")
+        lines.append(f"- **Window end:** {impacts.get('window_end')}")
+        lines.append(f"- **Events after anomaly:** {impacts.get('events_after_anomaly')}")
+        lines.append(f"- **Failure events after anomaly:** {impacts.get('failure_events_after_anomaly')}")
+        lines.append(f"- **First 5xx observed at:** {impacts.get('first_5xx_timestamp')}")
+        lines.append(f"- **Delta t0 -> first 5xx:** {impacts.get('first_5xx_delta_seconds')} seconds")
+        if impacts.get("summary"):
+            lines.append(f"- **Summary:** {impacts.get('summary')}")
+        status_counts = impacts.get("status_class_counts_after_anomaly", {})
+        if isinstance(status_counts, dict) and status_counts:
+            lines.append("- **Status class counts after anomaly:**")
+            for k, v in sorted(status_counts.items(), key=lambda x: x[0]):
+                lines.append(f"  - {k}: {v}")
+        mode_breakdown = impacts.get("failure_domain_breakdown_after_anomaly", [])
+        if isinstance(mode_breakdown, list) and mode_breakdown:
+            lines.append("- **Failure domain breakdown (post-anomaly):**")
+            for row in mode_breakdown:
+                lines.append(f"  - {row.get('failure_mode')}: {row.get('count')}")
+        comp_breakdown = impacts.get("component_failure_breakdown_after_anomaly", [])
+        if isinstance(comp_breakdown, list) and comp_breakdown:
+            lines.append("- **Component breakdown (post-anomaly):**")
+            for row in comp_breakdown[:8]:
+                lines.append(f"  - {row.get('component')}: {row.get('count')}")
+        dep_edges = impacts.get("observed_dependency_impacts_after_anomaly", [])
+        if isinstance(dep_edges, list) and dep_edges:
+            lines.append("- **Observed downstream dependency impacts (what broke what):**")
+            for row in dep_edges[:8]:
+                src_meta = row.get("source_meta") or {}
+                tgt_meta = row.get("target_meta") or {}
+                lines.append(
+                    f"  - {row.get('source_service')} -> {row.get('target_service')} "
+                    f"(count={row.get('count')}, first_seen={row.get('first_seen')}, "
+                    f"source_domain={src_meta.get('domain')}, target_domain={tgt_meta.get('domain')}, "
+                    f"target_system={tgt_meta.get('system')}, target_owner_hint={tgt_meta.get('owner_hint')})"
+                )
+        lift = impacts.get("pre_vs_post_failure_lift", {})
+        if isinstance(lift, dict) and lift:
+            lines.append("- **Pre vs post anomaly failure degradation:**")
+            lines.append(
+                f"  - pre_count={lift.get('pre_failure_count')}, post_count={lift.get('post_failure_count')}, "
+                f"pre_rate={lift.get('pre_failure_rate_eps')} eps, post_rate={lift.get('post_failure_rate_eps')} eps, "
+                f"overall_lift={lift.get('overall_lift_ratio')}"
+            )
+            lines.append(
+                f"  - fixed_window={lift.get('fixed_window_minutes')}m pre/post around t0: "
+                f"pre_count={lift.get('fixed_pre_failure_count')}, post_count={lift.get('fixed_post_failure_count')}, "
+                f"pre_rate={lift.get('fixed_pre_failure_rate_eps')} eps, post_rate={lift.get('fixed_post_failure_rate_eps')} eps, "
+                f"overall_lift={lift.get('fixed_overall_lift_ratio')}"
+            )
+            mode_lifts = lift.get("failure_mode_lifts", [])
+            if isinstance(mode_lifts, list) and mode_lifts:
+                lines.append("  - top failure-mode lifts:")
+                for row in mode_lifts[:5]:
+                    lines.append(
+                        f"    - {row.get('failure_mode')}: pre={row.get('pre_count')}, post={row.get('post_count')}, "
+                        f"pre_rate={row.get('pre_rate_eps')} eps, post_rate={row.get('post_rate_eps')} eps, lift={row.get('lift_ratio')}"
+                    )
+            fixed_mode_lifts = lift.get("fixed_failure_mode_lifts", [])
+            if isinstance(fixed_mode_lifts, list) and fixed_mode_lifts:
+                lines.append("  - top failure-mode lifts (fixed pre/post window):")
+                for row in fixed_mode_lifts[:5]:
+                    lines.append(
+                        f"    - {row.get('failure_mode')}: pre={row.get('pre_count')}, post={row.get('post_count')}, "
+                        f"pre_rate={row.get('pre_rate_eps')} eps, post_rate={row.get('post_rate_eps')} eps, lift={row.get('lift_ratio')}"
+                    )
+        top_services = impacts.get("top_impacted_services", [])
+        if isinstance(top_services, list) and top_services:
+            lines.append("- **Top impacted services:**")
+            for row in top_services:
+                lines.append(f"  - {row.get('service')}: {row.get('count')}")
+        top_resources = impacts.get("top_impacted_resources", [])
+        if isinstance(top_resources, list) and top_resources:
+            lines.append("- **Top impacted resources:**")
+            for row in top_resources:
+                lines.append(f"  - {row.get('resource')}: {row.get('count')}")
+        lines.append("")
 
         lines.append("## Suggested Next Actions\n")
         for action in _recommended_actions(summary):

@@ -52,8 +52,15 @@ STATUS_RE = re.compile(r"status[:=]\s*(\d{3})")
 ASUP_STATUS_RE = re.compile(r"(?:unexpected\s+status|status)[:=\s]+(\d{3})", re.IGNORECASE)
 HTTP_STATUS_RE = re.compile(r"\b(?:status|code|response)\s*[=:]?\s*(\d{3})\b", re.IGNORECASE)
 URI_RE = re.compile(r"(https?://[^\s\"']+|/[A-Za-z0-9_\-./?=&%]+)")
+STRICT_PATH_RE = re.compile(r"(/(?:api|apis|v1|v2|metrics|healthz|readyz|livez)[A-Za-z0-9_\-./?=&%]*)", re.IGNORECASE)
 VERB_HINT_RE = re.compile(
     r"\b(fetch|send|connect|watch|list|create|delete|update|retry|read|write|process)\b",
+    re.IGNORECASE,
+)
+HTTP_METHOD_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", re.IGNORECASE)
+METHOD_EQ_RE = re.compile(r"\bmethod\s*=\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", re.IGNORECASE)
+SEVERITY_HINT_RE = re.compile(
+    r"\b(?:level|severity)\s*[:=]\s*(fatal|error|warn|warning|info|debug|trace)\b|\[(fatal|error|warn|warning|info|debug|trace)\]",
     re.IGNORECASE,
 )
 FAILURE_HINT_PATTERNS = [
@@ -61,9 +68,19 @@ FAILURE_HINT_PATTERNS = [
     (re.compile(r"\bcontext\s+deadline\s+exceeded\b", re.IGNORECASE), "timeout"),
     (re.compile(r"\bconnection\s+refused\b", re.IGNORECASE), "connection_refused"),
     (re.compile(r"\bconnection\s+reset\b", re.IGNORECASE), "connection_reset"),
+    (re.compile(r"\btls\s+handshake\b", re.IGNORECASE), "tls_handshake"),
+    (re.compile(r"\bcertificate\b", re.IGNORECASE), "tls_certificate"),
+    (re.compile(r"\bdns\b", re.IGNORECASE), "dns_failure"),
+    (re.compile(r"\bno\s+such\s+host\b", re.IGNORECASE), "dns_failure"),
     (re.compile(r"\bnetwork\s+unreachable\b", re.IGNORECASE), "network_unreachable"),
     (re.compile(r"\btimeout\b", re.IGNORECASE), "timeout"),
     (re.compile(r"\brpc\s+error\b", re.IGNORECASE), "rpc_error"),
+    (re.compile(r"\bleader\s+election\b", re.IGNORECASE), "leader_election_failure"),
+    (re.compile(r"\bcrashloopbackoff\b", re.IGNORECASE), "crash_loop"),
+    (re.compile(r"\boomkilled\b", re.IGNORECASE), "oom_killed"),
+    (re.compile(r"\bout\s+of\s+memory\b", re.IGNORECASE), "oom"),
+    (re.compile(r"\breplica\s+set\b", re.IGNORECASE), "replica_instability"),
+    (re.compile(r"\bprimary\s+not\s+found\b", re.IGNORECASE), "replica_instability"),
     (re.compile(r"\bthreshold\s+exceeded\b", re.IGNORECASE), "threshold_exceeded"),
     (re.compile(r"\bexceeded\b", re.IGNORECASE), "threshold_exceeded"),
     (re.compile(r"\bexception\b", re.IGNORECASE), "exception"),
@@ -115,6 +132,31 @@ class Eventizer:
         return "other_json"
 
     @staticmethod
+    def _looks_code_identity(value: str) -> bool:
+        v = (value or "").strip()
+        if not v:
+            return False
+        # Common noisy identities from app logs (func path, file:line, serialized dict payloads).
+        if v.startswith("{") and ("func" in v or "source" in v):
+            return True
+        if ".go:" in v or ".py:" in v or ".java:" in v:
+            return True
+        if "/" in v and ":" in v and ("trace.go" in v or "interceptor.go" in v):
+            return True
+        return False
+
+    @staticmethod
+    def _sanitize_identity(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        v = str(value).strip()
+        if not v:
+            return None
+        if Eventizer._looks_code_identity(v):
+            return None
+        return v
+
+    @staticmethod
     def _extract_status_from_text(text: str) -> Optional[int]:
         if not text:
             return None
@@ -145,14 +187,15 @@ class Eventizer:
     def _extract_path_from_text(text: str) -> Optional[str]:
         if not text:
             return None
-        m = URI_RE.search(text)
+        # Safety-first: prefer stricter API/health style paths before generic URL match.
+        m = STRICT_PATH_RE.search(text) or URI_RE.search(text)
         return m.group(1) if m else None
 
     @staticmethod
     def _extract_verb_from_text(text: str) -> Optional[str]:
         if not text:
             return None
-        m = VERB_HINT_RE.search(text)
+        m = METHOD_EQ_RE.search(text) or HTTP_METHOD_RE.search(text) or VERB_HINT_RE.search(text)
         return m.group(1).lower() if m else None
 
     @staticmethod
@@ -163,6 +206,21 @@ class Eventizer:
             if pat.search(text):
                 return hint
         return None
+
+    @staticmethod
+    def _extract_severity_from_text(text: str) -> Optional[str]:
+        if not text:
+            return None
+        m = SEVERITY_HINT_RE.search(text)
+        if not m:
+            return None
+        token = m.group(1) or m.group(2)
+        if not token:
+            return None
+        token = token.upper()
+        if token == "WARNING":
+            token = "WARN"
+        return token
 
     @staticmethod
     def _parse_wrapped_outer(raw: str) -> Optional[Dict[str, Any]]:
@@ -197,18 +255,22 @@ class Eventizer:
             return {}
 
         out: Dict[str, Any] = {}
+        field_source: Dict[str, str] = {}
 
         ts = payload.get("time")
         if isinstance(ts, str) and ts:
             out["timestamp"] = ts
+            field_source["timestamp"] = "payload.time"
         else:
             t_date = ((payload.get("t") or {}).get("$date")) if isinstance(payload.get("t"), dict) else None
             if isinstance(t_date, str) and t_date:
                 out["timestamp"] = t_date
+                field_source["timestamp"] = "payload.t.$date"
             else:
                 collector_iso = Eventizer._iso_from_epoch((outer or {}).get("collector_ts"))
                 if collector_iso:
                     out["timestamp"] = collector_iso
+                    field_source["timestamp"] = "outer.collector_ts"
 
         kube = payload.get("kubernetes") if isinstance(payload.get("kubernetes"), dict) else {}
         labels = kube.get("labels") if isinstance(kube.get("labels"), dict) else {}
@@ -222,6 +284,7 @@ class Eventizer:
         )
         if service:
             out["service"] = str(service)
+            field_source["service"] = "kubernetes.labels_or_container"
 
         actor = (
             payload.get("user_name")
@@ -229,17 +292,24 @@ class Eventizer:
             or payload.get("ctx")
             or kube.get("container_name")
         )
-        if actor:
-            out["actor"] = str(actor)
+        actor_clean = Eventizer._sanitize_identity(actor)
+        if not actor_clean and service:
+            # Keep actor semantically usable when payload actor is code-path noise.
+            actor_clean = Eventizer._sanitize_identity(service)
+        if actor_clean:
+            out["actor"] = actor_clean
+            field_source["actor"] = "payload.user_name_or_caller_or_ctx"
 
         method = payload.get("method")
         if method:
             out["verb"] = str(method).lower()
+            field_source["verb"] = "payload.method"
         else:
             text_for_verb = f"{payload.get('msg') or ''} {payload.get('log') or ''}"
             verb = Eventizer._extract_verb_from_text(text_for_verb)
             if verb:
                 out["verb"] = verb
+                field_source["verb"] = "derived.regex_text"
 
         resource = (
             attr.get("collection")
@@ -252,16 +322,19 @@ class Eventizer:
         )
         if resource:
             out["resource"] = str(resource)
+            field_source["resource"] = "payload.attr_or_kubernetes"
 
         path = payload.get("path") or payload.get("uri")
         if not path:
             path = Eventizer._extract_path_from_text(str(payload.get("log") or payload.get("msg") or ""))
         if path:
             out["path"] = str(path)
+            field_source["path"] = "payload.path_or_uri_or_regex"
 
         stream = payload.get("stream")
         if stream:
             out["stage"] = str(stream).lower()
+            field_source["stage"] = "payload.stream"
 
         code = (
             Eventizer._coerce_http_code(payload.get("statusCode"))
@@ -283,6 +356,8 @@ class Eventizer:
         if code is not None:
             out["response_code"] = code
             out["http_class"] = f"{code // 100}xx"
+            field_source["response_code"] = "payload_or_nested_or_regex"
+            field_source["http_class"] = "derived.from_response_code"
 
         # Non-HTTP fallback signal for incident detection in text-heavy logs.
         msg_text = f"{payload.get('error') or ''} {payload.get('msg') or ''} {payload.get('log') or ''}"
@@ -302,10 +377,17 @@ class Eventizer:
             }.get(sev.upper())
             if mapped:
                 out["severity_hint"] = mapped
+                field_source["severity_hint"] = "payload.s"
         elif isinstance(payload.get("level"), str):
             lvl = str(payload.get("level")).upper()
             if lvl in {"FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"}:
                 out["severity_hint"] = lvl
+                field_source["severity_hint"] = "payload.level"
+        if "severity_hint" not in out:
+            sev_txt = Eventizer._extract_severity_from_text(f"{payload.get('msg') or ''} {payload.get('log') or ''}")
+            if sev_txt:
+                out["severity_hint"] = sev_txt
+                field_source["severity_hint"] = "derived.regex_text"
 
         if out.get("http_class"):
             out["status_family"] = "failure" if out["http_class"] in {"4xx", "5xx"} else "normal"
@@ -320,6 +402,7 @@ class Eventizer:
 
         out["source_subtype"] = (outer or {}).get("source_subtype") or "wrapped.logs"
         out["inner_type"] = Eventizer._detect_inner_type(payload)
+        out["field_source"] = field_source
         collector_ts = (outer or {}).get("collector_ts")
         if collector_ts is not None:
             out["collector_ts"] = collector_ts
@@ -333,38 +416,54 @@ class Eventizer:
             return {}
 
         out: Dict[str, Any] = {}
+        field_source: Dict[str, str] = {}
 
         # timestamp
         ts = obj.get("requestReceivedTimestamp")
         if ts:
             out["timestamp"] = ts
+            field_source["timestamp"] = "requestReceivedTimestamp"
 
         # actor
         actor = obj.get("user", {}).get("username")
-        if actor:
-            out["actor"] = actor
-            out["service"] = actor  # keep same behavior as CSV
+        actor_clean = Eventizer._sanitize_identity(actor)
+        if actor_clean:
+            out["actor"] = actor_clean
+            out["service"] = actor_clean  # keep same behavior as CSV
+            field_source["actor"] = "user.username"
+            field_source["service"] = "derived.from_actor"
 
         # verb
         out["verb"] = obj.get("verb")
+        if out.get("verb"):
+            field_source["verb"] = "verb"
 
         # resource
         ref = obj.get("objectRef", {})
         out["resource"] = ref.get("resource")
+        if out.get("resource"):
+            field_source["resource"] = "objectRef.resource"
 
         # path
         out["path"] = obj.get("requestURI")
+        if out.get("path"):
+            field_source["path"] = "requestURI"
 
         # stage
         stage = obj.get("stage")
         if stage:
             out["stage"] = stage.lower()
+            field_source["stage"] = "stage"
 
         # response code
         code = obj.get("responseStatus", {}).get("code")
         if isinstance(code, int):
             out["response_code"] = code
             out["http_class"] = f"{code // 100}xx"
+            field_source["response_code"] = "responseStatus.code"
+            field_source["http_class"] = "derived.from_response_code"
+
+        out["field_source"] = field_source
 
         return out
 
@@ -386,27 +485,40 @@ class Eventizer:
             return {}
 
         out: Dict[str, Any] = {}
+        field_source: Dict[str, str] = {}
 
         ts = (parts[1] or "").strip()
         if "T" in ts and ts.endswith("Z"):
             out["timestamp"] = ts
+            field_source["timestamp"] = "csv.col[1]"
 
         actor = (parts[2] or "").strip()
-        if actor:
-            out["actor"] = actor
-            out["service"] = actor  # preserve raw identity
+        actor_clean = Eventizer._sanitize_identity(actor)
+        if actor_clean:
+            out["actor"] = actor_clean
+            out["service"] = actor_clean  # preserve raw identity
+            field_source["actor"] = "csv.col[2]"
+            field_source["service"] = "derived.from_actor"
 
         if len(parts) > 3:
             out["verb"] = (parts[3] or "").strip()
+            if out["verb"]:
+                field_source["verb"] = "csv.col[3]"
 
         if len(parts) > 4:
             out["resource"] = (parts[4] or "").strip()
+            if out["resource"]:
+                field_source["resource"] = "csv.col[4]"
 
         if len(parts) > 8:
             out["path"] = (parts[8] or "").strip()
+            if out["path"]:
+                field_source["path"] = "csv.col[8]"
 
         if len(parts) > 10:
             out["stage"] = (parts[10] or "").strip().lower()
+            if out["stage"]:
+                field_source["stage"] = "csv.col[10]"
 
         code = None
         if len(parts) > 11:
@@ -419,6 +531,10 @@ class Eventizer:
 
         out["response_code"] = code
         out["http_class"] = f"{code // 100}xx" if isinstance(code, int) else None
+        if isinstance(code, int):
+            field_source["response_code"] = "csv.col[11]"
+            field_source["http_class"] = "derived.from_response_code"
+        out["field_source"] = field_source
 
         return out
 

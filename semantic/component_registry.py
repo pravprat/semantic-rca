@@ -14,6 +14,9 @@ COMPONENT_REGISTRY = {
         "kube-controller-manager": ["kube-controller-manager", "controller-manager"],
         "kube-scheduler": ["kube-scheduler", "scheduler"],
         "etcd": ["etcd"],
+        "rke2-server": ["rke2-server", "rke2 server", "rke2r1"],
+        "rke2-agent": ["rke2-agent", "rke2 agent"],
+        "traefik": ["traefik", "ingressroute", "ingress-controller"],
     },
 
     "node": {
@@ -25,11 +28,53 @@ COMPONENT_REGISTRY = {
         "gatekeeper": ["gatekeeper", "constraint", "constrainttemplates"],
         "kyverno": ["kyverno"],
         "opa": ["opa"],
+        "vault": ["vault", "vault-agent-injector", "sidecar-injector"],
     },
 
     "gitops": {
         "argocd": ["argocd", "argocd-server", "argocd-application-controller"],
         "flux": ["flux", "fluxcd"],
+    },
+
+    "networking": {
+        "calico-node": ["calico-node", "felix", "bird", "calico"],
+        "calico-kube-controllers": ["calico-kube-controllers", "kube-controllers/ipam"],
+        "metallb": ["metallb", "frr"],
+        "tigera-operator": ["tigera-operator", "tigera"],
+    },
+
+    "storage": {
+        "trident-operator": ["operator.trident.netapp.io", "trident-operator"],
+        "trident-csi-controller": ["controller.csi.trident.netapp.io", "csi-attacher", "csi-provisioner", "csi-snapshotter"],
+        "trident-main": ["trident-main"],
+        "snapshot-controller": ["snapshot-controller", "csi-snapshotter"],
+        "ontap-proxy": ["ontap-proxy"],
+        "support-configuration": ["support-configuration"],
+    },
+
+    "observability": {
+        "prometheus": ["prometheus", "kube-prometheus"],
+        "fluent-bit": ["fluent-bit", "fluent"],
+        "vector-store": ["vector-store", "vector-store-chart", "vector"],
+        "log-rotation": ["log-rotation"],
+        "file-metadata": ["file-metadata", "metadata-chart", "metadata"],
+    },
+
+    "data_platform": {
+        "job-tracker": ["job-tracker"],
+        "authorizer": ["authorizer"],
+        "occmauth": ["occmauth"],
+        "aide-control": ["aide", "dsai"],
+        "dcn-manager": ["dcn_manager", "dcn-manager", "dcn_mgr", "dcn manager"],
+        "mongodb": ["mongodb", "mongod", "replicasetmonitor", "connpool"],
+        "milvus-core": ["milvus", "milvus-operator", "milvus-autoscaler", "mixcoord", "querynode", "datanode", "indexnode", "proxy"],
+        # Keep patterns specific; bare "manager" is too ambiguous in controller logs.
+        "scheduler-worker": ["scheduler", "worker", "scheduler-manager", "job-manager"],
+    },
+
+    "hardware": {
+        "gpu-operator": ["gpu-operator", "gpu"],
+        "node-feature-discovery": ["node-feature-discovery"],
     },
 }
 

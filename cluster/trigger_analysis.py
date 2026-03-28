@@ -65,6 +65,7 @@ def run_trigger_analysis(
     cluster_error_count = defaultdict(int)
     cluster_fallback_error_count = defaultdict(int)
     cluster_times = defaultdict(list)
+    cluster_failure_hints = defaultdict(Counter)
 
     # ✅ NEW
     cluster_actors = defaultdict(Counter)
@@ -111,6 +112,8 @@ def run_trigger_analysis(
             if sev in {"ERROR", "FATAL"} or status_family == "failure" or failure_hint:
                 cluster_error_count[cid] += 1
                 cluster_fallback_error_count[cid] += 1
+                if failure_hint:
+                    cluster_failure_hints[cid][str(failure_hint)] += 1
 
         # ------------------------
         # Timestamp
@@ -230,6 +233,8 @@ def run_trigger_analysis(
             "event_count": n,
             "error_count": errors,
             "fallback_error_count": cluster_fallback_error_count.get(cid, 0),
+            "failure_hint_diversity": len(cluster_failure_hints[cid]),
+            "top_failure_hints": [k for k, _ in cluster_failure_hints[cid].most_common(3)],
 
             "duration_seconds": duration,
 
@@ -264,9 +269,13 @@ def run_trigger_analysis(
         raise RuntimeError("[trigger_analysis] No clusters produced")
 
     for cid, s in results.items():
+        hint_div = int(s.get("failure_hint_diversity") or 0)
+        fallback_errors = int(s.get("fallback_error_count") or 0)
         s["is_candidate"] = (
                 s["trigger_score"] >= 0.15
                 or s["error_count"] >= 3
+                or fallback_errors >= 5
+                or (fallback_errors >= 3 and hint_div >= 2)
         )
 
     with open(output_path, "w", encoding="utf-8") as f:

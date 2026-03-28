@@ -45,10 +45,31 @@ def infer_failure_mode(status_class: str, code: int, status_family: str = "unkno
         return "client_error"
 
     if status_family == "failure":
-        if failure_hint in {"timeout", "connection_refused", "connection_reset", "network_unreachable"}:
+        if failure_hint in {
+            "timeout",
+            "connection_refused",
+            "connection_reset",
+            "network_unreachable",
+            "dns_failure",
+            "tls_handshake",
+            "tls_certificate",
+            "replica_instability",
+        }:
             return "dependency_failure"
-        if failure_hint in {"rpc_error", "exception", "panic", "failed", "threshold_exceeded"}:
+        if failure_hint in {
+            "rpc_error",
+            "exception",
+            "panic",
+            "failed",
+            "threshold_exceeded",
+            "oom",
+            "oom_killed",
+            "crash_loop",
+            "leader_election_failure",
+        }:
             return "service_failure"
+        if failure_hint in {"forbidden", "unauthorized", "access_denied", "permission_denied"}:
+            return "authz_failure"
         return "service_failure"
 
     return "normal"
