@@ -182,6 +182,7 @@ def render_detailed_markdown(
                 lines.append(
                     f"  - {row.get('source_service')} -> {row.get('target_service')} "
                     f"(count={row.get('count')}, first_seen={row.get('first_seen')}, "
+                    f"failure_location={row.get('failure_location')}, causal_confidence_tier={row.get('causal_confidence_tier')}, "
                     f"source_domain={src_meta.get('domain')}, target_domain={tgt_meta.get('domain')}, "
                     f"target_system={tgt_meta.get('system')}, target_owner_hint={tgt_meta.get('owner_hint')})"
                 )
