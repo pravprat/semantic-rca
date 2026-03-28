@@ -63,6 +63,10 @@ SEVERITY_HINT_RE = re.compile(
     r"\b(?:level|severity)\s*[:=]\s*(fatal|error|warn|warning|info|debug|trace)\b|\[(fatal|error|warn|warning|info|debug|trace)\]",
     re.IGNORECASE,
 )
+SVC_FQDN_RE = re.compile(
+    r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+){1,6}\.svc)(?::\d+)?",
+    re.IGNORECASE,
+)
 FAILURE_HINT_PATTERNS = [
     (re.compile(r"\bdeadline\s+exceeded\b", re.IGNORECASE), "timeout"),
     (re.compile(r"\bcontext\s+deadline\s+exceeded\b", re.IGNORECASE), "timeout"),
@@ -223,6 +227,17 @@ class Eventizer:
         return token
 
     @staticmethod
+    def _extract_dependency_target(text: str) -> Optional[Dict[str, str]]:
+        if not text:
+            return None
+        m = SVC_FQDN_RE.search(text)
+        if not m:
+            return None
+        fqdn = m.group(1).lower()
+        service = fqdn.split(".")[0]
+        return {"target_dependency_service": service, "target_dependency_fqdn": fqdn}
+
+    @staticmethod
     def _parse_wrapped_outer(raw: str) -> Optional[Dict[str, Any]]:
         s = (raw or "").strip()
         prefix = None
@@ -284,7 +299,9 @@ class Eventizer:
         )
         if service:
             out["service"] = str(service)
+            out["source_service"] = str(service)
             field_source["service"] = "kubernetes.labels_or_container"
+            field_source["source_service"] = "derived.from_service"
 
         actor = (
             payload.get("user_name")
@@ -365,6 +382,12 @@ class Eventizer:
         if failure_hint:
             out["failure_hint"] = failure_hint
 
+        dep = Eventizer._extract_dependency_target(msg_text)
+        if dep:
+            out.update(dep)
+            field_source["target_dependency_service"] = "derived.from_text_fqdn"
+            field_source["target_dependency_fqdn"] = "derived.from_text_fqdn"
+
         sev = payload.get("s")
         if isinstance(sev, str):
             mapped = {
@@ -399,6 +422,18 @@ class Eventizer:
                 out["status_family"] = "warning"
             else:
                 out["status_family"] = "unknown"
+
+        # Explicit causality role fields to avoid source/target ambiguity in support workflows.
+        if out.get("target_dependency_service"):
+            out["failure_location"] = "dependency_target"
+            out["causal_confidence_tier"] = "observed"
+            field_source["failure_location"] = "derived.target_dependency_present"
+            field_source["causal_confidence_tier"] = "derived.target_dependency_present"
+        elif out.get("status_family") == "failure":
+            out["failure_location"] = "source_service"
+            out["causal_confidence_tier"] = "likely"
+            field_source["failure_location"] = "derived.failure_without_target"
+            field_source["causal_confidence_tier"] = "derived.failure_without_target"
 
         out["source_subtype"] = (outer or {}).get("source_subtype") or "wrapped.logs"
         out["inner_type"] = Eventizer._detect_inner_type(payload)

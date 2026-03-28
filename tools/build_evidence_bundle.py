@@ -278,9 +278,31 @@ def _compute_post_anomaly_impacts(
             if isinstance(res, str) and res:
                 res_counts[res] = res_counts.get(res, 0) + 1
             raw_text = str(e.get("raw_text") or "")
-            src = str(svc or "unknown_service")
+            sf = e.get("structured_fields") if isinstance(e.get("structured_fields"), dict) else {}
+            src = str((sf.get("source_service") if isinstance(sf, dict) else None) or svc or "unknown_service")
             ts = _parse_ts(e.get("timestamp"))
-            for dep in _extract_dependency_targets(raw_text):
+            dep_candidates: List[Dict[str, str]] = []
+            from_structured = False
+            if isinstance(sf, dict) and sf.get("target_dependency_service"):
+                dep_candidates.append(
+                    {
+                        "target_service": str(sf.get("target_dependency_service")),
+                        "target_fqdn": str(sf.get("target_dependency_fqdn") or ""),
+                    }
+                )
+                from_structured = True
+            if not dep_candidates:
+                dep_candidates = _extract_dependency_targets(raw_text)
+            if from_structured:
+                failure_location = str((sf.get("failure_location") if isinstance(sf, dict) else None) or "dependency_target")
+                confidence_tier = str((sf.get("causal_confidence_tier") if isinstance(sf, dict) else None) or "observed")
+            elif dep_candidates:
+                failure_location = "dependency_target"
+                confidence_tier = "observed"
+            else:
+                failure_location = str((sf.get("failure_location") if isinstance(sf, dict) else None) or "source_service")
+                confidence_tier = str((sf.get("causal_confidence_tier") if isinstance(sf, dict) else None) or "likely")
+            for dep in dep_candidates:
                 tgt = dep.get("target_service") or "unknown_target"
                 key = (src, tgt)
                 row = dep_edges.get(key)
@@ -291,6 +313,8 @@ def _compute_post_anomaly_impacts(
                         "target_fqdn": dep.get("target_fqdn"),
                         "count": 1,
                         "first_seen": e.get("timestamp"),
+                        "failure_location": failure_location,
+                        "causal_confidence_tier": confidence_tier,
                         "source_meta": _system_owner_for_service(src, raw_text),
                         "target_meta": _system_owner_for_service(tgt, raw_text),
                     }
