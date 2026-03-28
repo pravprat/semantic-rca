@@ -220,6 +220,7 @@ def cmd_evidence_bundle(args):
         grounded_events_path=PATHS["root_events"],
         graph_path=PATHS["graph"],
         report_path=PATHS["rca_report"],
+        events_path=PATHS["events"],
         output_path=OUTPUT_DIR / "incident_evidence_bundle.json",
     )
 

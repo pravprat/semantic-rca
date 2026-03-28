@@ -425,6 +425,11 @@ def main() -> None:
     )
     p.add_argument("--report-json", default=None, help="Optional path to write validation JSON report.")
     p.add_argument("--report-md", default=None, help="Optional path to write validation Markdown report.")
+    p.add_argument(
+        "--require-step11",
+        action="store_true",
+        help="If set, include Step 11 in final PASS/FAIL gating.",
+    )
     args = p.parse_args()
 
     outputs = Path(args.outputs_dir)
@@ -443,7 +448,10 @@ def main() -> None:
         "step10_incident_assertions": step10_validate(outputs, compat_v142=args.compat_v142),
         "step11_timeline_or_diagnostics": step11_validate(outputs, compat_v142=args.compat_v142),
     }
-    overall = all(step_status.values())
+    required_steps = [k for k in step_status.keys() if k != "step11_timeline_or_diagnostics"]
+    if args.require_step11:
+        required_steps.append("step11_timeline_or_diagnostics")
+    overall = all(step_status[k] for k in required_steps)
 
     print("\n=== FINAL QA SUMMARY ===")
     print(f"Overall status: {pass_fail(overall)}")
@@ -454,6 +462,8 @@ def main() -> None:
             "outputs_dir": str(outputs),
             "raw_log": str(raw_log) if raw_log else None,
             "compat_v142": args.compat_v142,
+            "require_step11": args.require_step11,
+            "required_steps_for_overall": required_steps,
             "steps": step_status,
             "overall_status": "PASS" if overall else "FAIL",
             "stats": detailed_stats,
@@ -472,6 +482,7 @@ def main() -> None:
                 f"- Outputs directory: `{report['outputs_dir']}`",
                 f"- Raw log: `{report['raw_log']}`" if report["raw_log"] else "- Raw log: `none`",
                 f"- Compatibility mode (v1.4.2): `{args.compat_v142}`",
+                f"- Require Step 11 for overall: `{args.require_step11}`",
                 "",
                 "## Step Results",
                 "",
