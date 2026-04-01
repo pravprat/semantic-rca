@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator, Optional, Iterable, Union
+from typing import Iterator, Optional, Iterable, Union, List
 from pathlib import Path
 import json
 import gzip
@@ -203,17 +203,36 @@ def iter_records_from_path(
     path = Path(path)
 
     if path.is_file():
-        yield from reader.iter_records(path)
+        if path.suffixes[-2:] == [".log", ".gz"] or path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+                yield from reader._iter_lines(f, source_file=path.name)
+        else:
+            yield from reader.iter_records(path)
         return
 
-    for file in sorted(path.iterdir()):
-
-        if file.suffix == ".log":
+    for file in iter_log_files(path):
+        if file.suffixes[-2:] == [".log", ".gz"] or file.suffix == ".gz":
+            with gzip.open(file, "rt", encoding="utf-8", errors="replace") as f:
+                yield from reader._iter_lines(f, source_file=file.name)
+        else:
             yield from reader.iter_records(file)
 
-        elif file.suffixes[-2:] == [".log", ".gz"]:
-            with gzip.open(file, "rt", encoding="utf-8", errors="replace") as f:
-                yield from reader._iter_lines(
-                    f,
-                    source_file=file.name,
-                )
+
+def iter_log_files(path: Union[str, Path]) -> List[Path]:
+    root = Path(path)
+    if root.is_file():
+        return [root]
+
+    files: List[Path] = []
+    for file in root.rglob("*"):
+        if not file.is_file():
+            continue
+        if file.name.startswith("."):
+            continue
+        # Accept common plain and gzipped log formats.
+        if file.suffix in {".log", ".txt", ".json", ".out"}:
+            files.append(file)
+            continue
+        if file.suffix == ".gz":
+            files.append(file)
+    return sorted(files)

@@ -65,6 +65,8 @@ def cmd_ingest(args):
     run_ingest(
         logfile=args.logfile,
         output_path=str(PATHS["events"]),
+        file_batch_size=getattr(args, "ingest_file_batch_size", 10),
+        batch_size=getattr(args, "ingest_event_batch_size", 2000),
     )
 
 # ------------------------------------------------------------
@@ -78,6 +80,7 @@ def cmd_embed(args):
         events_path=str(PATHS["events"]),
         output_vectors_path=str(PATHS["embeddings"]),
         output_index_path=str(PATHS["index"]),
+        embed_chunk_size=getattr(args, "embed_chunk_size", 10000),
     )
 
 # ------------------------------------------------------------
@@ -94,6 +97,9 @@ def cmd_cluster(args):
         event_cluster_map_output_path=str(PATHS["event_cluster_map"]),
         min_cluster_size=args.min_cluster_size,
         pca_dims=args.pca_dims,
+        max_cluster_events=getattr(args, "max_cluster_events", 120000),
+        cluster_overflow_mode=getattr(args, "cluster_overflow_mode", "downsample"),
+        cluster_mode=getattr(args, "cluster_mode", "standard"),
     )
 
 # ------------------------------------------------------------
@@ -362,16 +368,31 @@ def build_parser():
     # ingest
     ingest = sub.add_parser("ingest", help="Parse raw logs into events.jsonl")
     ingest.add_argument("logfile")
+    ingest.add_argument("--ingest-file-batch-size", type=int, default=10)
+    ingest.add_argument("--ingest-event-batch-size", type=int, default=2000)
     ingest.set_defaults(func=cmd_ingest)
 
     # embed
     embed = sub.add_parser("embed", help="Generate embeddings")
+    embed.add_argument("--embed-chunk-size", type=int, default=10000)
     embed.set_defaults(func=cmd_embed)
 
     # cluster
     cluster = sub.add_parser("cluster", help="Cluster events into patterns")
     cluster.add_argument("--min-cluster-size", type=int, default=15)
     cluster.add_argument("--pca-dims", type=int, default=256)
+    cluster.add_argument("--max-cluster-events", type=int, default=120000)
+    cluster.add_argument(
+        "--cluster-overflow-mode",
+        choices=["fail", "downsample"],
+        default="downsample",
+    )
+    cluster.add_argument(
+        "--cluster-mode",
+        choices=["standard", "fast", "auto"],
+        default="standard",
+        help="standard=hdbscan/fallback, fast=minibatch kmeans, auto=fast on large runs",
+    )
     cluster.set_defaults(func=cmd_cluster)
 
     # trigger analysis
@@ -437,8 +458,23 @@ def build_parser():
     allp.add_argument("logfile", nargs="?", help="Path to raw logfile")
     allp.add_argument("--min-cluster-size", type=int, default=15)
     allp.add_argument("--pca-dims", type=int, default=256)
+    allp.add_argument("--max-cluster-events", type=int, default=120000)
+    allp.add_argument(
+        "--cluster-overflow-mode",
+        choices=["fail", "downsample"],
+        default="downsample",
+    )
+    allp.add_argument(
+        "--cluster-mode",
+        choices=["standard", "fast", "auto"],
+        default="standard",
+        help="standard=hdbscan/fallback, fast=minibatch kmeans, auto=fast on large runs",
+    )
     allp.add_argument("--gap-seconds", type=int, default=30)
     allp.add_argument("--max-seeds", type=int, default=3)
+    allp.add_argument("--ingest-file-batch-size", type=int, default=10)
+    allp.add_argument("--ingest-event-batch-size", type=int, default=2000)
+    allp.add_argument("--embed-chunk-size", type=int, default=10000)
     allp.set_defaults(func=cmd_all)
     allp.add_argument(
         "--clean",

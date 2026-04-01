@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import List, Dict, Any
 
-from parsers.log_reader import LogReader, iter_records_from_path
+from parsers.log_reader import LogReader, iter_log_files
 from parsers.eventizer import Eventizer
 from semantic.enrichment import enrich_event
 
@@ -14,6 +14,7 @@ def run_ingest(
     logfile: str,
     output_path: str,
     batch_size: int = 2000,
+    file_batch_size: int = 10,
 ) -> None:
 
     reader = LogReader()
@@ -21,15 +22,35 @@ def run_ingest(
 
     count = 0
     batch: List[Dict[str, Any]] = []
+    files = iter_log_files(logfile)
+    total_files = len(files)
+
+    if total_files == 0:
+        raise RuntimeError(f"No input log files found at: {logfile}")
+
+    print(
+        f"[ingest] discovered files={total_files} "
+        f"file_batch_size={file_batch_size} event_batch_size={batch_size}"
+    )
 
     with open(output_path, "w", encoding="utf-8") as out:
+        batch_file_index = 0
 
-        for record in iter_records_from_path(reader, logfile):
-            batch.append(record)
+        for idx, file_path in enumerate(files, start=1):
+            if (idx - 1) % max(1, file_batch_size) == 0:
+                batch_file_index += 1
+                end_idx = min(total_files, idx - 1 + max(1, file_batch_size))
+                print(
+                    f"[ingest] file_batch={batch_file_index} "
+                    f"files={idx}-{end_idx}/{total_files}"
+                )
 
-            if len(batch) >= batch_size:
-                count += _flush_batch(batch, eventizer, out)
-                batch.clear()
+            for record in reader.iter_records(file_path):
+                batch.append(record)
+
+                if len(batch) >= batch_size:
+                    count += _flush_batch(batch, eventizer, out)
+                    batch.clear()
 
         # ---- flush remaining -----------------------------------------
         if batch:
