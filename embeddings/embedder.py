@@ -28,7 +28,12 @@ class Embedder:
     """
 
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        encode_batch_size: int = 32,
+        device: str = "mps",
+    ):
         try:
 
             from sentence_transformers import SentenceTransformer
@@ -40,6 +45,8 @@ class Embedder:
             ) from e
 
         self.model = SentenceTransformer(model_name)
+        self.encode_batch_size = max(1, int(encode_batch_size))
+        self.device = device
 
     def fit_transform(self, texts: List[str]) -> EmbeddingResult:
         """
@@ -64,8 +71,8 @@ class Embedder:
 
             vecs = self.model.encode(
                 batch,
-                batch_size=32,
-                device="mps",
+                batch_size=self.encode_batch_size,
+                device=self.device,
                 convert_to_numpy=True,
                 show_progress_bar=False,
                 normalize_embeddings=True

@@ -67,6 +67,8 @@ def run_embedding(
     output_vectors_path: str,
     output_index_path: str,
     embed_chunk_size: int = 10000,
+    embed_batch_size: int = 64,
+    embed_device: str = "mps",
 ) -> None:
     total_events = count_events(events_path)
     if total_events == 0:
@@ -77,7 +79,10 @@ def run_embedding(
         return
 
     vectors_tmp_path = str(Path(output_vectors_path).with_suffix(".mmap"))
-    emb = Embedder()
+    emb = Embedder(
+        encode_batch_size=embed_batch_size,
+        device=embed_device,
+    )
     memmap: np.memmap | None = None
     vector_dim = 0
     write_row = 0

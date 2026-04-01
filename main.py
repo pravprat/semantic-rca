@@ -65,8 +65,8 @@ def cmd_ingest(args):
     run_ingest(
         logfile=args.logfile,
         output_path=str(PATHS["events"]),
-        file_batch_size=getattr(args, "ingest_file_batch_size", 10),
-        batch_size=getattr(args, "ingest_event_batch_size", 2000),
+        file_batch_size=getattr(args, "ingest_file_batch_size", 20),
+        batch_size=getattr(args, "ingest_event_batch_size", 5000),
     )
 
 # ------------------------------------------------------------
@@ -80,7 +80,9 @@ def cmd_embed(args):
         events_path=str(PATHS["events"]),
         output_vectors_path=str(PATHS["embeddings"]),
         output_index_path=str(PATHS["index"]),
-        embed_chunk_size=getattr(args, "embed_chunk_size", 10000),
+        embed_chunk_size=getattr(args, "embed_chunk_size", 12000),
+        embed_batch_size=getattr(args, "embed_batch_size", 64),
+        embed_device=getattr(args, "embed_device", "mps"),
     )
 
 # ------------------------------------------------------------
@@ -368,13 +370,15 @@ def build_parser():
     # ingest
     ingest = sub.add_parser("ingest", help="Parse raw logs into events.jsonl")
     ingest.add_argument("logfile")
-    ingest.add_argument("--ingest-file-batch-size", type=int, default=10)
-    ingest.add_argument("--ingest-event-batch-size", type=int, default=2000)
+    ingest.add_argument("--ingest-file-batch-size", type=int, default=20)
+    ingest.add_argument("--ingest-event-batch-size", type=int, default=5000)
     ingest.set_defaults(func=cmd_ingest)
 
     # embed
     embed = sub.add_parser("embed", help="Generate embeddings")
-    embed.add_argument("--embed-chunk-size", type=int, default=10000)
+    embed.add_argument("--embed-chunk-size", type=int, default=12000)
+    embed.add_argument("--embed-batch-size", type=int, default=64)
+    embed.add_argument("--embed-device", choices=["mps", "cpu"], default="mps")
     embed.set_defaults(func=cmd_embed)
 
     # cluster
@@ -472,9 +476,11 @@ def build_parser():
     )
     allp.add_argument("--gap-seconds", type=int, default=30)
     allp.add_argument("--max-seeds", type=int, default=3)
-    allp.add_argument("--ingest-file-batch-size", type=int, default=10)
-    allp.add_argument("--ingest-event-batch-size", type=int, default=2000)
-    allp.add_argument("--embed-chunk-size", type=int, default=10000)
+    allp.add_argument("--ingest-file-batch-size", type=int, default=20)
+    allp.add_argument("--ingest-event-batch-size", type=int, default=5000)
+    allp.add_argument("--embed-chunk-size", type=int, default=12000)
+    allp.add_argument("--embed-batch-size", type=int, default=64)
+    allp.add_argument("--embed-device", choices=["mps", "cpu"], default="mps")
     allp.set_defaults(func=cmd_all)
     allp.add_argument(
         "--clean",

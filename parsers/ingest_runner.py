@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 from typing import List, Dict, Any
 
 from parsers.log_reader import LogReader, iter_log_files
@@ -13,8 +14,8 @@ from semantic.enrichment import enrich_event
 def run_ingest(
     logfile: str,
     output_path: str,
-    batch_size: int = 2000,
-    file_batch_size: int = 10,
+    batch_size: int = 5000,
+    file_batch_size: int = 20,
 ) -> None:
 
     reader = LogReader()
@@ -44,6 +45,16 @@ def run_ingest(
                     f"[ingest] file_batch={batch_file_index} "
                     f"files={idx}-{end_idx}/{total_files}"
                 )
+
+            if file_path.suffixes[-2:] == [".log", ".gz"] or file_path.suffix == ".gz":
+                with gzip.open(file_path, "rt", encoding="utf-8", errors="replace") as f:
+                    records_iter = reader._iter_lines(f, source_file=file_path.name)
+                    for record in records_iter:
+                        batch.append(record)
+                        if len(batch) >= batch_size:
+                            count += _flush_batch(batch, eventizer, out)
+                            batch.clear()
+                continue
 
             for record in reader.iter_records(file_path):
                 batch.append(record)
