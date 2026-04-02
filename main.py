@@ -13,46 +13,57 @@ from pathlib import Path
 # ------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+DEFAULT_OUTPUTS_ROOT = PROJECT_ROOT / "outputs"
 
 
 def clean_outputs():
-    if OUTPUT_DIR.exists():
-        print(f"\n🧹 Cleaning outputs directory: {OUTPUT_DIR}")
-        shutil.rmtree(OUTPUT_DIR)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if DEFAULT_OUTPUTS_ROOT.exists():
+        print(f"\n🧹 Cleaning outputs directory: {DEFAULT_OUTPUTS_ROOT}")
+        shutil.rmtree(DEFAULT_OUTPUTS_ROOT)
+    DEFAULT_OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
     print("✅ outputs/ cleaned")
 
 
 def ensure_outputs() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-# Centralized paths (single source of truth)
-PATHS = {
-    "events": OUTPUT_DIR / "events.jsonl",
-    "embeddings": OUTPUT_DIR / "event_embeddings.npy",
-    "index": OUTPUT_DIR / "event_index.json",
-    "clusters": OUTPUT_DIR / "clusters.json",
-    "event_cluster_map": OUTPUT_DIR / "event_cluster_map.json",
-    "trigger_stats": OUTPUT_DIR / "cluster_trigger_stats.json",
-    "incidents": OUTPUT_DIR / "incidents.json",
-    "graph": OUTPUT_DIR / "incident_causal_graph.json",
-    "candidates": OUTPUT_DIR / "incident_root_candidates.json",
-    "root_events": OUTPUT_DIR / "incident_root_events.json",
-    "rca_report": OUTPUT_DIR / "incident_rca_report.json",
-    "report_md": OUTPUT_DIR / "incident_rca_report.md",
-    "evidence_bundle": OUTPUT_DIR / "incident_evidence_bundle.json",
-    "detailed_report_json": OUTPUT_DIR / "incident_rca_report_detailed.json",
-    "detailed_report_md": OUTPUT_DIR / "incident_rca_report_detailed.md",
-    "assertions": OUTPUT_DIR / "incident_assertions.json",
-    "timeline_summary": OUTPUT_DIR / "incident_timeline_summary.json",
-    "incident_detection_status": OUTPUT_DIR / "incident_detection_status.json",
-    "preincident_json": OUTPUT_DIR / "preincident_diagnostics.json",
-    "preincident_md": OUTPUT_DIR / "preincident_diagnostics.md",
-    "validation_json": OUTPUT_DIR / "validation_report.json",
-    "validation_md": OUTPUT_DIR / "validation_report.md",
-}
+def get_output_dir(args) -> Path:
+    root = Path(getattr(args, "outputs_root", DEFAULT_OUTPUTS_ROOT))
+    profile = getattr(args, "pipeline_profile", "v1")
+    return root / profile
+
+
+def get_paths(args) -> dict[str, Path]:
+    output_dir = get_output_dir(args)
+    profile = getattr(args, "pipeline_profile", "v1")
+    events_file = "events.parquet" if profile == "v2" else "events.jsonl"
+    index_file = "event_index.parquet" if profile == "v2" else "event_index.json"
+    return {
+        "output_dir": output_dir,
+        "events": output_dir / events_file,
+        "embeddings": output_dir / "event_embeddings.npy",
+        "index": output_dir / index_file,
+        "clusters": output_dir / "clusters.json",
+        "event_cluster_map": output_dir / "event_cluster_map.json",
+        "trigger_stats": output_dir / "cluster_trigger_stats.json",
+        "incidents": output_dir / "incidents.json",
+        "graph": output_dir / "incident_causal_graph.json",
+        "candidates": output_dir / "incident_root_candidates.json",
+        "root_events": output_dir / "incident_root_events.json",
+        "rca_report": output_dir / "incident_rca_report.json",
+        "report_md": output_dir / "incident_rca_report.md",
+        "evidence_bundle": output_dir / "incident_evidence_bundle.json",
+        "detailed_report_json": output_dir / "incident_rca_report_detailed.json",
+        "detailed_report_md": output_dir / "incident_rca_report_detailed.md",
+        "assertions": output_dir / "incident_assertions.json",
+        "timeline_summary": output_dir / "incident_timeline_summary.json",
+        "incident_detection_status": output_dir / "incident_detection_status.json",
+        "preincident_json": output_dir / "preincident_diagnostics.json",
+        "preincident_md": output_dir / "preincident_diagnostics.md",
+        "validation_json": output_dir / "validation_report.json",
+        "validation_md": output_dir / "validation_report.md",
+    }
 
 # ------------------------------------------------------------
 # Step 1: Ingest
@@ -62,9 +73,11 @@ from parsers.ingest_runner import run_ingest
 
 
 def cmd_ingest(args):
+    paths = get_paths(args)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
     run_ingest(
         logfile=args.logfile,
-        output_path=str(PATHS["events"]),
+        output_path=str(paths["events"]),
         file_batch_size=getattr(args, "ingest_file_batch_size", 20),
         batch_size=getattr(args, "ingest_event_batch_size", 5000),
     )
@@ -76,10 +89,12 @@ def cmd_ingest(args):
 from embeddings.embed_runner import run_embedding
 
 def cmd_embed(args):
+    paths = get_paths(args)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
     run_embedding(
-        events_path=str(PATHS["events"]),
-        output_vectors_path=str(PATHS["embeddings"]),
-        output_index_path=str(PATHS["index"]),
+        events_path=str(paths["events"]),
+        output_vectors_path=str(paths["embeddings"]),
+        output_index_path=str(paths["index"]),
         embed_chunk_size=getattr(args, "embed_chunk_size", 12000),
         embed_batch_size=getattr(args, "embed_batch_size", 64),
         embed_device=getattr(args, "embed_device", "mps"),
@@ -92,11 +107,12 @@ def cmd_embed(args):
 from cluster.cluster_runner import run_clustering
 
 def cmd_cluster(args):
+    paths = get_paths(args)
     run_clustering(
-        events_path=str(PATHS["events"]),
-        embeddings_path=str(PATHS["embeddings"]),
-        clusters_output_path=str(PATHS["clusters"]),
-        event_cluster_map_output_path=str(PATHS["event_cluster_map"]),
+        events_path=str(paths["events"]),
+        embeddings_path=str(paths["embeddings"]),
+        clusters_output_path=str(paths["clusters"]),
+        event_cluster_map_output_path=str(paths["event_cluster_map"]),
         min_cluster_size=args.min_cluster_size,
         pca_dims=args.pca_dims,
         max_cluster_events=getattr(args, "max_cluster_events", 120000),
@@ -111,11 +127,12 @@ def cmd_cluster(args):
 from cluster.trigger_analysis import run_trigger_analysis
 
 def cmd_trigger_analysis(args):
+    paths = get_paths(args)
     run_trigger_analysis(
-        events_path=str(PATHS["events"]),
-        clusters_path=str(PATHS["clusters"]),
-        event_cluster_map_path=str(PATHS["event_cluster_map"]),
-        output_path=str(PATHS["trigger_stats"]),
+        events_path=str(paths["events"]),
+        clusters_path=str(paths["clusters"]),
+        event_cluster_map_path=str(paths["event_cluster_map"]),
+        output_path=str(paths["trigger_stats"]),
     )
 
 # ------------------------------------------------------------
@@ -128,31 +145,30 @@ from tools.build_preincident_diagnostics import build_preincident_diagnostics, r
 
 
 def cmd_incident_detection(args):
+    paths = get_paths(args)
     incident_mode = getattr(args, "incident_mode", "v2")
     if incident_mode == "v2":
         out = run_incident_detection_v2(
-            cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
-            output_path=str(PATHS["incidents"]),
-            events_path=str(PATHS["events"]),
-            event_cluster_map_path=str(PATHS["event_cluster_map"]),
+            cluster_trigger_stats_path=str(paths["trigger_stats"]),
+            output_path=str(paths["incidents"]),
             gap_seconds=getattr(args, "gap_seconds", 30),
             max_seeds=getattr(args, "max_seeds", 3),
-            intra_cluster_gap_seconds=getattr(args, "intra_cluster_gap_seconds", 60),
-            episode_score_threshold=getattr(args, "episode_score_threshold", 0.45),
-            inter_episode_gap_seconds=getattr(args, "inter_episode_gap_seconds", 120),
+            cluster_window_cap_seconds=getattr(args, "cluster_window_cap_seconds", 900),
             max_incident_duration_seconds=getattr(args, "max_incident_duration_seconds", 14400),
+            episode_gap_seconds=getattr(args, "episode_gap_seconds", 120),
+            max_episode_duration_seconds=getattr(args, "max_episode_duration_seconds", 1200),
             semantic_jaccard_threshold=getattr(args, "semantic_jaccard_threshold", 0.3),
-            status_output_path=str(PATHS["incident_detection_status"]),
+            status_output_path=str(paths["incident_detection_status"]),
         )
     else:
         out = run_incident_detection(
-            cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
-            output_path=str(PATHS["incidents"]),
+            cluster_trigger_stats_path=str(paths["trigger_stats"]),
+            output_path=str(paths["incidents"]),
             gap_seconds=getattr(args, "gap_seconds", 30),
             max_seeds=getattr(args, "max_seeds", 3),
             cluster_window_cap_seconds=getattr(args, "cluster_window_cap_seconds", 900),
             max_incident_duration_seconds=getattr(args, "max_incident_duration_seconds", 3600),
-            status_output_path=str(PATHS["incident_detection_status"]),
+            status_output_path=str(paths["incident_detection_status"]),
         )
     return out
 
@@ -160,14 +176,16 @@ def cmd_incident_detection(args):
 def cmd_validate_outputs(args) -> bool:
     """Run external validation script and write reports."""
     validation_script = PROJECT_ROOT / "validation" / "validate_pipeline_steps.py"
-    outputs_dir = Path(getattr(args, "outputs_dir", OUTPUT_DIR))
+    outputs_dir_arg = getattr(args, "outputs_dir", None)
+    outputs_dir = Path(outputs_dir_arg) if outputs_dir_arg else get_output_dir(args)
     raw_log_arg = getattr(args, "raw_log", None)
     cmd = [sys.executable, str(validation_script), "--outputs-dir", str(outputs_dir)]
     if raw_log_arg:
         cmd.extend(["--raw-log", str(raw_log_arg)])
     if getattr(args, "compat_v142", False):
         cmd.append("--compat-v142")
-    cmd.extend(["--report-json", str(PATHS["validation_json"]), "--report-md", str(PATHS["validation_md"])])
+    paths = get_paths(args)
+    cmd.extend(["--report-json", str(paths["validation_json"]), "--report-md", str(paths["validation_md"])])
     rc = subprocess.run(cmd, check=False).returncode
     return rc == 0
 
@@ -184,14 +202,15 @@ def cmd_causal_analysis(args):
     - Root candidate extraction
     - Event-level grounding (evidence)
     """
+    paths = get_paths(args)
     run_causal_analysis(
-        incidents_path=str(PATHS["incidents"]),
-        cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
-        graph_output_path=str(PATHS["graph"]),
-        candidates_output_path=str(PATHS["candidates"]),
-        event_cluster_map_path=str(PATHS["event_cluster_map"]),
-        events_path=str(PATHS["events"]),
-        grounded_events_output_path=str(PATHS["root_events"]),
+        incidents_path=str(paths["incidents"]),
+        cluster_trigger_stats_path=str(paths["trigger_stats"]),
+        graph_output_path=str(paths["graph"]),
+        candidates_output_path=str(paths["candidates"]),
+        event_cluster_map_path=str(paths["event_cluster_map"]),
+        events_path=str(paths["events"]),
+        grounded_events_output_path=str(paths["root_events"]),
     )
 
 # ------------------------------------------------------------
@@ -209,22 +228,23 @@ def cmd_report(args):
     - Render human-readable report (Markdown)
     """
 
+    paths = get_paths(args)
     print("\n[STEP 7] building RCA JSON report")
 
     build_rca_report(
-        incidents_path=str(PATHS["incidents"]),
-        candidates_path=str(PATHS["candidates"]),
-        root_events_path=str(PATHS["root_events"]),
-        output_path=str(PATHS["rca_report"]),
+        incidents_path=str(paths["incidents"]),
+        candidates_path=str(paths["candidates"]),
+        root_events_path=str(paths["root_events"]),
+        output_path=str(paths["rca_report"]),
     )
 
     print("[STEP 7] rendering Markdown report")
 
     render_report(
-        incidents_path=str(PATHS["incidents"]),
-        candidates_path=str(PATHS["candidates"]),
-        grounded_events_path=str(PATHS["root_events"]),
-        output_path=str(PATHS["report_md"]),
+        incidents_path=str(paths["incidents"]),
+        candidates_path=str(paths["candidates"]),
+        grounded_events_path=str(paths["root_events"]),
+        output_path=str(paths["report_md"]),
     )
 
     print("[STEP 7] reporting complete")
@@ -240,16 +260,17 @@ def cmd_evidence_bundle(args):
     Step 8:
     - Build forensic evidence bundle JSON from existing RCA artifacts.
     """
+    paths = get_paths(args)
     print("\n[STEP 8] building evidence bundle")
 
     build_evidence_bundle(
-        incidents_path=PATHS["incidents"],
-        candidates_path=PATHS["candidates"],
-        grounded_events_path=PATHS["root_events"],
-        graph_path=PATHS["graph"],
-        report_path=PATHS["rca_report"],
-        events_path=PATHS["events"],
-        output_path=OUTPUT_DIR / "incident_evidence_bundle.json",
+        incidents_path=paths["incidents"],
+        candidates_path=paths["candidates"],
+        grounded_events_path=paths["root_events"],
+        graph_path=paths["graph"],
+        report_path=paths["rca_report"],
+        events_path=paths["events"],
+        output_path=paths["evidence_bundle"],
     )
 
     print("[STEP 8] evidence bundle complete")
@@ -266,18 +287,19 @@ def cmd_detailed_report(args):
     - Build detailed RCA JSON by merging base report and evidence bundle
     - Render support-first detailed Markdown report
     """
+    paths = get_paths(args)
     print("\n[STEP 9] building detailed RCA JSON report")
 
     detailed_reports = build_detailed_report_json(
-        base_report_path=PATHS["rca_report"],
-        evidence_bundle_path=PATHS["evidence_bundle"],
-        output_json_path=PATHS["detailed_report_json"],
+        base_report_path=paths["rca_report"],
+        evidence_bundle_path=paths["evidence_bundle"],
+        output_json_path=paths["detailed_report_json"],
     )
 
     print("[STEP 9] rendering detailed Markdown report")
     render_detailed_markdown(
         detailed_reports=detailed_reports,
-        output_md_path=PATHS["detailed_report_md"],
+        output_md_path=paths["detailed_report_md"],
     )
 
     print("[STEP 9] detailed reporting complete")
@@ -293,13 +315,14 @@ def cmd_incident_assertions(args):
     Step 10:
     - Build machine-checkable incident assertions from RCA artifacts
     """
+    paths = get_paths(args)
     print("\n[STEP 10] building incident assertions")
     out = build_assertions(
-        incidents_path=PATHS["incidents"],
-        candidates_path=PATHS["candidates"],
-        roots_path=PATHS["root_events"],
-        evidence_bundle_path=PATHS["evidence_bundle"],
-        output_path=PATHS["assertions"],
+        incidents_path=paths["incidents"],
+        candidates_path=paths["candidates"],
+        roots_path=paths["root_events"],
+        evidence_bundle_path=paths["evidence_bundle"],
+        output_path=paths["assertions"],
     )
     print(f"[STEP 10] incident assertions complete (incidents={len(out)})")
 
@@ -308,11 +331,12 @@ def cmd_incident_assertions(args):
 # ------------------------------------------------------------
 
 def cmd_preincident_diagnostics(args):
-    diag = build_preincident_diagnostics(OUTPUT_DIR)
-    PATHS["preincident_json"].write_text(json.dumps(diag, ensure_ascii=False, indent=2), encoding="utf-8")
-    PATHS["preincident_md"].write_text(render_markdown(diag), encoding="utf-8")
-    print(f"[PREINCIDENT] -> {PATHS['preincident_json']}")
-    print(f"[PREINCIDENT] -> {PATHS['preincident_md']}")
+    paths = get_paths(args)
+    diag = build_preincident_diagnostics(paths["output_dir"])
+    paths["preincident_json"].write_text(json.dumps(diag, ensure_ascii=False, indent=2), encoding="utf-8")
+    paths["preincident_md"].write_text(render_markdown(diag), encoding="utf-8")
+    print(f"[PREINCIDENT] -> {paths['preincident_json']}")
+    print(f"[PREINCIDENT] -> {paths['preincident_md']}")
 
 # ------------------------------------------------------------
 # Full pipeline runner
@@ -341,6 +365,8 @@ def cmd_all(args):
         clean_outputs()
 
     ensure_outputs()
+    paths = get_paths(args)
+    paths["output_dir"].mkdir(parents=True, exist_ok=True)
 
     for step_name, label, fn in PIPELINE_STEPS:
         print(f"\n[{step_name}] {label}")
@@ -354,23 +380,23 @@ def cmd_all(args):
         # If no incidents are detected, emit diagnostics and stop gracefully.
         if label == "incident_detection":
             incidents = []
-            if PATHS["incidents"].exists():
-                incidents = json.loads(PATHS["incidents"].read_text(encoding="utf-8"))
+            if paths["incidents"].exists():
+                incidents = json.loads(paths["incidents"].read_text(encoding="utf-8"))
             if not incidents:
                 print("\n[PIPELINE] no incidents detected, generating pre-incident diagnostics")
                 cmd_preincident_diagnostics(args)
                 print("\n[PIPELINE] running post-run validation")
-                args.outputs_dir = OUTPUT_DIR
+                args.outputs_dir = paths["output_dir"]
                 args.raw_log = args.logfile
                 cmd_validate_outputs(args)
                 print("[PIPELINE] stopping after diagnostics (no incident path)")
-                print(f"Outputs available at: {OUTPUT_DIR}")
+                print(f"Outputs available at: {paths['output_dir']}")
                 return
 
     print("\n🎉 Pipeline complete")
-    print(f"Outputs available at: {OUTPUT_DIR}")
+    print(f"Outputs available at: {paths['output_dir']}")
     print("\n[PIPELINE] running post-run validation")
-    args.outputs_dir = OUTPUT_DIR
+    args.outputs_dir = paths["output_dir"]
     args.raw_log = args.logfile
     cmd_validate_outputs(args)
 
@@ -387,8 +413,13 @@ def build_parser():
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    def add_profile_args(sp):
+        sp.add_argument("--pipeline-profile", choices=["v1", "v2"], default="v1")
+        sp.add_argument("--outputs-root", default=str(DEFAULT_OUTPUTS_ROOT))
+
     # ingest
     ingest = sub.add_parser("ingest", help="Parse raw logs into events.jsonl")
+    add_profile_args(ingest)
     ingest.add_argument("logfile")
     ingest.add_argument("--ingest-file-batch-size", type=int, default=20)
     ingest.add_argument("--ingest-event-batch-size", type=int, default=5000)
@@ -396,6 +427,7 @@ def build_parser():
 
     # embed
     embed = sub.add_parser("embed", help="Generate embeddings")
+    add_profile_args(embed)
     embed.add_argument("--embed-chunk-size", type=int, default=12000)
     embed.add_argument("--embed-batch-size", type=int, default=64)
     embed.add_argument("--embed-device", choices=["mps", "cpu"], default="mps")
@@ -403,6 +435,7 @@ def build_parser():
 
     # cluster
     cluster = sub.add_parser("cluster", help="Cluster events into patterns")
+    add_profile_args(cluster)
     cluster.add_argument("--min-cluster-size", type=int, default=15)
     cluster.add_argument("--pca-dims", type=int, default=256)
     cluster.add_argument("--max-cluster-events", type=int, default=120000)
@@ -421,18 +454,19 @@ def build_parser():
 
     # trigger analysis
     trigger = sub.add_parser("trigger_analysis", help="Compute trigger stats")
+    add_profile_args(trigger)
     trigger.set_defaults(func=cmd_trigger_analysis)
 
     # incident detection
     detection = sub.add_parser("incident_detection", help="Detect incidents")
+    add_profile_args(detection)
     detection.add_argument("--incident-mode", choices=["v1", "v2"], default="v2")
     detection.add_argument("--gap-seconds", type=int, default=30)
     detection.add_argument("--max-seeds", type=int, default=3)
-    detection.add_argument("--intra-cluster-gap-seconds", type=int, default=60)
-    detection.add_argument("--episode-score-threshold", type=float, default=0.45)
-    detection.add_argument("--inter-episode-gap-seconds", type=int, default=120)
     detection.add_argument("--semantic-jaccard-threshold", type=float, default=0.3)
     detection.add_argument("--cluster-window-cap-seconds", type=int, default=900)
+    detection.add_argument("--episode-gap-seconds", type=int, default=120)
+    detection.add_argument("--max-episode-duration-seconds", type=int, default=1200)
     detection.add_argument("--max-incident-duration-seconds", type=int, default=14400)
     detection.set_defaults(func=cmd_incident_detection)
 
@@ -441,38 +475,45 @@ def build_parser():
         "causal_analysis",
         help="Step 6: causal graph + root candidates + event grounding"
     )
+    add_profile_args(causal)
     causal.set_defaults(func=cmd_causal_analysis)
 
     report = sub.add_parser("report", help="Step 7: Generate RCA report (JSON + Markdown)")
+    add_profile_args(report)
     report.set_defaults(func=cmd_report)
 
     evidence = sub.add_parser(
         "evidence_bundle",help="Step 8: Build incident evidence bundle JSON")
+    add_profile_args(evidence)
     evidence.set_defaults(func=cmd_evidence_bundle)
 
     detailed = sub.add_parser(
         "detailed_report",
         help="Step 9: Generate detailed RCA report (JSON + Markdown)"
     )
+    add_profile_args(detailed)
     detailed.set_defaults(func=cmd_detailed_report)
 
     assertions = sub.add_parser(
         "incident_assertions",
         help="Step 10: Generate incident assertions JSON"
     )
+    add_profile_args(assertions)
     assertions.set_defaults(func=cmd_incident_assertions)
 
     prediag = sub.add_parser(
         "preincident_diagnostics",
         help="Build diagnostics when incidents are not detected"
     )
+    add_profile_args(prediag)
     prediag.set_defaults(func=cmd_preincident_diagnostics)
 
     validate = sub.add_parser(
         "validate",
         help="Run QA validation checks on output artifacts"
     )
-    validate.add_argument("--outputs-dir", default=str(OUTPUT_DIR))
+    add_profile_args(validate)
+    validate.add_argument("--outputs-dir", default=None)
     validate.add_argument("--raw-log", default=None)
     validate.add_argument(
         "--compat-v142",
@@ -486,6 +527,7 @@ def build_parser():
         "all",
         help="Run full pipeline end-to-end"
     )
+    add_profile_args(allp)
     allp.add_argument("logfile", nargs="?", help="Path to raw logfile")
     allp.add_argument("--min-cluster-size", type=int, default=15)
     allp.add_argument("--pca-dims", type=int, default=256)
@@ -504,11 +546,10 @@ def build_parser():
     allp.add_argument("--gap-seconds", type=int, default=30)
     allp.add_argument("--max-seeds", type=int, default=3)
     allp.add_argument("--incident-mode", choices=["v1", "v2"], default="v2")
-    allp.add_argument("--intra-cluster-gap-seconds", type=int, default=60)
-    allp.add_argument("--episode-score-threshold", type=float, default=0.45)
-    allp.add_argument("--inter-episode-gap-seconds", type=int, default=120)
     allp.add_argument("--semantic-jaccard-threshold", type=float, default=0.3)
     allp.add_argument("--cluster-window-cap-seconds", type=int, default=900)
+    allp.add_argument("--episode-gap-seconds", type=int, default=120)
+    allp.add_argument("--max-episode-duration-seconds", type=int, default=1200)
     allp.add_argument("--max-incident-duration-seconds", type=int, default=14400)
     allp.add_argument("--ingest-file-batch-size", type=int, default=20)
     allp.add_argument("--ingest-event-batch-size", type=int, default=5000)

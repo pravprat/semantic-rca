@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 
 from cluster.pattern_cluster import cluster_patterns
+from event_io import load_events
 
 MAX_LOCAL_CLUSTER_EVENTS = 120000
 
@@ -35,14 +36,6 @@ def tag_cluster_type(cluster_size: int, total_events: int) -> str:
         return "minor_pattern"
     else:
         return "contextual"
-
-
-def load_events(events_path: str) -> List[Dict[str, Any]]:
-    events = []
-    with open(events_path, "r", encoding="utf-8") as f:
-        for line in f:
-            events.append(json.loads(line))
-    return events
 
 
 def run_clustering(

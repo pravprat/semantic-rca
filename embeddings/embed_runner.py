@@ -10,30 +10,53 @@ from typing import List, Dict, Any, Iterator
 import numpy as np
 
 from embeddings.embedder import Embedder
+from event_io import count_events, iter_events, is_parquet_path
 
 
-def iter_event_chunks(events_path: str, chunk_size: int) -> Iterator[List[Dict[str, Any]]]:
-    chunk: List[Dict[str, Any]] = []
-    with open(events_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunk.append(json.loads(line))
-            if len(chunk) >= chunk_size:
-                yield chunk
-                chunk = []
-    if chunk:
-        yield chunk
+class _IndexWriter:
+    def __init__(self, output_index_path: str):
+        self.path = output_index_path
+        self.as_parquet = is_parquet_path(output_index_path)
+        self._json_f = None
+        self._first = True
+        self._pq_writer = None
+        self._pa = None
 
+    def __enter__(self):
+        if self.as_parquet:
+            return self
+        self._json_f = open(self.path, "w", encoding="utf-8")
+        self._json_f.write("[\n")
+        return self
 
-def count_events(events_path: str) -> int:
-    count = 0
-    with open(events_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                count += 1
-    return count
+    def write_rows(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        if self.as_parquet:
+            if self._pq_writer is None:
+                import pyarrow as pa  # type: ignore
+                import pyarrow.parquet as pq  # type: ignore
+                self._pa = pa
+                table = pa.Table.from_pylist(rows)
+                self._pq_writer = pq.ParquetWriter(self.path, table.schema)
+                self._pq_writer.write_table(table)
+            else:
+                self._pq_writer.write_table(self._pa.Table.from_pylist(rows))
+            return
+        for row in rows:
+            if not self._first:
+                self._json_f.write(",\n")
+            self._json_f.write(json.dumps(row, ensure_ascii=False))
+            self._first = False
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._pq_writer is not None:
+            self._pq_writer.close()
+            self._pq_writer = None
+        if self._json_f is not None:
+            self._json_f.write("\n]\n")
+            self._json_f.close()
+            self._json_f = None
 
 
 def build_index_entry(e: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -89,11 +112,8 @@ def run_embedding(
     chunk_id = 0
     index_written = 0
 
-    with open(output_index_path, "w", encoding="utf-8") as index_f:
-        index_f.write("[\n")
-        first_index_entry = True
-
-        for events in iter_event_chunks(events_path, chunk_size=max(1, embed_chunk_size)):
+    with _IndexWriter(output_index_path) as index_writer:
+        for events in iter_events(events_path, chunk_size=max(1, embed_chunk_size)):
             chunk_id += 1
             texts = [e.get("embedding_text", "") for e in events]
             res = emb.fit_transform(texts)
@@ -111,20 +131,16 @@ def run_embedding(
             memmap[write_row:write_row + chunk_rows] = res.vectors
             write_row += chunk_rows
 
+            index_rows = []
             for e, text in zip(events, texts):
-                entry_json = json.dumps(build_index_entry(e, text), ensure_ascii=False)
-                if not first_index_entry:
-                    index_f.write(",\n")
-                index_f.write(entry_json)
-                first_index_entry = False
-                index_written += 1
+                index_rows.append(build_index_entry(e, text))
+            index_writer.write_rows(index_rows)
+            index_written += len(index_rows)
 
             print(
                 f"[embed] chunk={chunk_id} rows={chunk_rows} "
                 f"processed={write_row}/{total_events}"
             )
-
-        index_f.write("\n]\n")
 
     if memmap is None:
         raise RuntimeError("[embed] failed to initialize vector memmap")

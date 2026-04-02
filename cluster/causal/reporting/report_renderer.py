@@ -8,6 +8,49 @@ from cluster.causal.reporting.pattern_classifier import classify_failure_pattern
 from cluster.causal.reporting.explanation_builder import build_explanation
 
 
+def _symptom_summary(root_events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    codes: Dict[int, int] = {}
+    actors: Dict[str, int] = {}
+    resources: Dict[str, int] = {}
+    for ev in root_events:
+        rc = ev.get("response_code")
+        if isinstance(rc, int):
+            codes[rc] = codes.get(rc, 0) + 1
+        a = ev.get("actor")
+        if a:
+            actors[a] = actors.get(a, 0) + 1
+        r = ev.get("resource")
+        if r:
+            resources[r] = resources.get(r, 0) + 1
+    top_codes = sorted(codes.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_actors = sorted(actors.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_resources = sorted(resources.items(), key=lambda x: x[1], reverse=True)[:3]
+    return {
+        "total_root_events": len(root_events),
+        "top_codes": top_codes,
+        "top_actors": top_actors,
+        "top_resources": top_resources,
+    }
+
+
+def _suggest_log_targets(top_candidate: Dict[str, Any], root_events: List[Dict[str, Any]]) -> List[str]:
+    targets: List[str] = []
+    fd = str(top_candidate.get("failure_domain") or "unknown")
+    if fd in {"rbac_authorization", "authz_failure"}:
+        targets.append("kube-apiserver audit logs for authorization denials around incident start")
+        targets.append("rbac object history: Role/ClusterRole and Binding changes for impacted service accounts")
+    elif fd in {"resource_missing", "scheduler", "control_plane"}:
+        targets.append("controller/operator logs for missing objects and reconcile retries")
+        targets.append("kube-apiserver and controller-manager logs around object create/update failures")
+    else:
+        targets.append("service/component logs tied to top actor/resource in supporting failures")
+        targets.append("control-plane logs around incident start for correlated retries/errors")
+
+    if any((ev.get("response_code") or 0) >= 500 for ev in root_events if isinstance(ev.get("response_code"), int)):
+        targets.append("upstream dependency and backend service health logs for 5xx interval")
+    return targets
+
+
 def render_report(
     incidents_path: str,
     candidates_path: str,
@@ -87,10 +130,37 @@ def render_report(
         lines.append(f"- **Response Code:** {earliest.get('response_code')}\n")
 
         # -------------------------
-        # Explanation
+        # Engineering interpretation
         # -------------------------
-        lines.append("\n## Explanation\n")
-        lines.append(explanation["summary"] + "\n")
+        sym = _symptom_summary(root_events)
+        lines.append("\n## What Broke (Symptoms)\n")
+        lines.append(
+            f"- Observed `{sym['total_root_events']}` grounded failure events in this incident window."
+        )
+        if sym["top_codes"]:
+            lines.append(f"- Dominant response codes: `{sym['top_codes']}`")
+        if sym["top_actors"]:
+            lines.append(f"- Most affected actors: `{sym['top_actors']}`")
+        if sym["top_resources"]:
+            lines.append(f"- Most affected resources: `{sym['top_resources']}`")
+
+        lines.append("\n## Likely Cause (RCA Hypothesis)\n")
+        lines.append(
+            f"- We hypothesize cluster `{top['cluster_id']}` as the source pattern "
+            f"because it is earliest/highest-ranked with pattern `{pattern_info['pattern']}`."
+        )
+        lines.append(f"- Supporting explanation: {explanation['summary']}")
+
+        lines.append("\n## Why This Is Not Just a Symptom\n")
+        lines.append(
+            f"- Candidate score `{round(top.get('candidate_score', 0.0), 3)}`, "
+            f"out-degree `{top.get('out_degree')}`, in-degree `{top.get('in_degree')}`."
+        )
+        lines.append("- Earliest grounded failures align with this candidate's timeline.")
+
+        lines.append("\n## Where Engineers Should Look Next\n")
+        for t in _suggest_log_targets(top, root_events):
+            lines.append(f"- {t}")
 
         # -------------------------
         # Evidence

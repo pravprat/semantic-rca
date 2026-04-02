@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List
+from event_io import load_events
 
 
 def _load_json(path: Path) -> Any:
@@ -13,17 +14,14 @@ def _load_json(path: Path) -> Any:
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
+    return load_events(path)
 
 
 def build_preincident_diagnostics(outputs_dir: Path) -> Dict[str, Any]:
-    events = _load_jsonl(outputs_dir / "events.jsonl")
+    events_path = outputs_dir / "events.parquet"
+    if not events_path.exists():
+        events_path = outputs_dir / "events.jsonl"
+    events = _load_jsonl(events_path)
     trigger = _load_json(outputs_dir / "cluster_trigger_stats.json")
     cstats = _load_json(outputs_dir / "clusters_stats.json")
 

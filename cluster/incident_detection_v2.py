@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -18,40 +17,14 @@ def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _is_failure_event(e: Dict[str, Any]) -> bool:
-    rc = e.get("response_code")
+def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
-        if rc is not None and int(rc) >= 400:
-            return True
+        return float(x)
     except Exception:
-        pass
-    sev = str(e.get("severity") or "").upper()
-    sf = str(e.get("status_family") or "").lower()
-    if sev in {"ERROR", "FATAL"} or sf == "failure" or e.get("failure_hint"):
-        return True
-    return False
+        return default
 
 
-def _failure_mode(e: Dict[str, Any]) -> str:
-    sem = e.get("semantic") if isinstance(e.get("semantic"), dict) else {}
-    mode = str((sem or {}).get("failure_mode") or "").strip()
-    if mode:
-        return mode
-    sf = str(e.get("status_family") or "").lower()
-    if sf == "failure":
-        return "failure"
-    return "unknown"
-
-
-def _dep_target(e: Dict[str, Any]) -> str:
-    sf = e.get("structured_fields") if isinstance(e.get("structured_fields"), dict) else {}
-    tgt = sf.get("target_dependency_service")
-    if tgt:
-        return str(tgt)
-    return "none"
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
+def _jaccard(a: Set[str], b: Set[str]) -> float:
     if not a and not b:
         return 1.0
     if not a or not b:
@@ -59,136 +32,144 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(1, len(a | b))
 
 
-def _build_episodes_for_cluster(
-    cluster_id: str,
-    cluster_rows: List[Tuple[datetime, Dict[str, Any]]],
-    intra_cluster_gap_seconds: int,
-    baseline_failure_eps: float,
+def _extract_modes(stat: Dict[str, Any]) -> Set[str]:
+    out: Set[str] = set()
+    for row in stat.get("top_failure_modes", []) or []:
+        mode = row.get("mode")
+        if mode:
+            out.add(str(mode))
+    if not out:
+        for hint in stat.get("top_failure_hints", []) or []:
+            out.add(str(hint))
+    return out
+
+
+def _extract_targets(stat: Dict[str, Any]) -> Set[str]:
+    out: Set[str] = set()
+    for row in stat.get("dependency_targets", []) or []:
+        svc = row.get("service")
+        if svc:
+            out.add(str(svc))
+    return out
+
+
+def _extract_actor_resource_tokens(stat: Dict[str, Any]) -> Set[str]:
+    out: Set[str] = set()
+    for row in stat.get("top_actors", []) or []:
+        a = row.get("actor")
+        if a:
+            out.add(f"actor:{a}")
+    for row in stat.get("top_resources", []) or []:
+        r = row.get("resource")
+        if r:
+            out.add(f"resource:{r}")
+    if not out:
+        if stat.get("actor"):
+            out.add(f"actor:{stat.get('actor')}")
+        if stat.get("resource"):
+            out.add(f"resource:{stat.get('resource')}")
+    return out
+
+
+def _build_cluster_windows(
+    stats: Dict[str, Any],
+    cluster_window_cap_seconds: int,
 ) -> List[Dict[str, Any]]:
-    if not cluster_rows:
-        return []
-
-    rows = sorted(cluster_rows, key=lambda x: x[0])
-    episodes: List[List[Tuple[datetime, Dict[str, Any]]]] = []
-    cur: List[Tuple[datetime, Dict[str, Any]]] = []
-    gap = timedelta(seconds=max(1, intra_cluster_gap_seconds))
-    for row in rows:
-        if not cur:
-            cur = [row]
+    windows: List[Dict[str, Any]] = []
+    for cid, s in stats.items():
+        if not s.get("is_candidate"):
             continue
-        if row[0] <= cur[-1][0] + gap:
-            cur.append(row)
-        else:
-            episodes.append(cur)
-            cur = [row]
-    if cur:
-        episodes.append(cur)
-
-    out: List[Dict[str, Any]] = []
-    for idx, ep in enumerate(episodes, start=1):
-        start = ep[0][0]
-        end = ep[-1][0]
-        duration = max(1.0, (end - start).total_seconds())
-        failure_count = len(ep)
-        failure_eps = failure_count / duration
-        burst = failure_eps / max(1e-9, baseline_failure_eps)
-        mode_ctr = Counter(_failure_mode(e) for _, e in ep)
-        dep_ctr = Counter(_dep_target(e) for _, e in ep)
-        dominant_mode = mode_ctr.most_common(1)[0][0] if mode_ctr else "unknown"
-        dominant_dep = dep_ctr.most_common(1)[0][0] if dep_ctr else "none"
-        mode_consistency = mode_ctr.most_common(1)[0][1] / max(1, failure_count) if mode_ctr else 0.0
-
-        # Deterministic episode score.
-        intensity = min(1.0, burst / 5.0)
-        consistency = min(1.0, mode_consistency)
-        dep_signal = 1.0 if dominant_dep != "none" else 0.0
-        score = round(0.45 * intensity + 0.35 * consistency + 0.20 * dep_signal, 6)
-
-        out.append(
+        start = _parse_ts(s.get("first_seen"))
+        end = _parse_ts(s.get("last_seen"))
+        if not start or not end:
+            continue
+        capped_end = end
+        if cluster_window_cap_seconds > 0:
+            cap_end = start + timedelta(seconds=cluster_window_cap_seconds)
+            if cap_end < capped_end:
+                capped_end = cap_end
+        if capped_end < start:
+            continue
+        windows.append(
             {
-                "episode_id": f"{cluster_id}.E{idx}",
-                "cluster_id": cluster_id,
+                "cluster_id": cid,
                 "start": start,
-                "end": end,
-                "duration_seconds": int((end - start).total_seconds()),
-                "failure_count": failure_count,
-                "failure_eps": round(failure_eps, 6),
-                "burst_factor": round(burst, 6),
-                "dominant_failure_mode": dominant_mode,
-                "dominant_dependency_target": dominant_dep,
-                "failure_modes": sorted(set(mode_ctr.keys())),
-                "dependency_targets": sorted(t for t in set(dep_ctr.keys()) if t != "none"),
-                "episode_score": score,
+                "end": capped_end,
+                "trigger_score": _safe_float(s.get("trigger_score")),
+                "stat": s,
             }
         )
-    return out
+    windows.sort(key=lambda x: x["start"])
+    return windows
+
+
+def _build_episodes(
+    windows: List[Dict[str, Any]],
+    episode_gap_seconds: int,
+    max_episode_duration_seconds: int,
+) -> List[List[Dict[str, Any]]]:
+    episodes: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+
+    for w in windows:
+        if not current:
+            current = [w]
+            continue
+        last = current[-1]
+        cur_start = current[0]["start"]
+        candidate_end = max(last["end"], w["end"])
+        candidate_duration = int((candidate_end - cur_start).total_seconds())
+        contiguous = w["start"] <= last["end"] + timedelta(seconds=max(1, episode_gap_seconds))
+        within_duration = (
+            max_episode_duration_seconds <= 0
+            or candidate_duration <= max_episode_duration_seconds
+        )
+        if contiguous and within_duration:
+            current.append(w)
+        else:
+            episodes.append(current)
+            current = [w]
+    if current:
+        episodes.append(current)
+    return episodes
+
+
+def _episode_signature(episode: List[Dict[str, Any]]) -> Dict[str, Any]:
+    modes: Set[str] = set()
+    targets: Set[str] = set()
+    tokens: Set[str] = set()
+    score_sum = 0.0
+    for w in episode:
+        s = w["stat"]
+        modes |= _extract_modes(s)
+        targets |= _extract_targets(s)
+        tokens |= _extract_actor_resource_tokens(s)
+        score_sum += _safe_float(w.get("trigger_score"))
+    return {
+        "modes": modes,
+        "targets": targets,
+        "tokens": tokens,
+        "score_sum": score_sum,
+    }
 
 
 def run_incident_detection_v2(
     cluster_trigger_stats_path: str,
     output_path: str,
-    events_path: str,
-    event_cluster_map_path: str,
     gap_seconds: int = 30,
     max_seeds: int = 3,
-    intra_cluster_gap_seconds: int = 60,
-    episode_score_threshold: float = 0.45,
-    inter_episode_gap_seconds: int = 120,
-    max_incident_duration_seconds: int = 14400,
-    semantic_jaccard_threshold: float = 0.3,
+    cluster_window_cap_seconds: int = 900,
+    max_incident_duration_seconds: int = 3600,
+    episode_gap_seconds: int = 120,
+    max_episode_duration_seconds: int = 1200,
+    semantic_jaccard_threshold: float = 0.35,
     status_output_path: str | None = None,
 ) -> List[Dict[str, Any]]:
     with open(cluster_trigger_stats_path, "r", encoding="utf-8") as f:
         stats: Dict[str, Any] = json.load(f)
-    with open(event_cluster_map_path, "r", encoding="utf-8") as f:
-        event_cluster_map: Dict[str, str] = json.load(f)
-    events: List[Dict[str, Any]] = []
-    with open(events_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                events.append(json.loads(line))
 
-    # Baseline failure eps for intensity normalization.
-    all_fail_ts = []
-    for e in events:
-        if _is_failure_event(e):
-            ts = _parse_ts(e.get("timestamp"))
-            if ts:
-                all_fail_ts.append(ts)
-    baseline_failure_eps = 1e-6
-    if all_fail_ts:
-        t0, t1 = min(all_fail_ts), max(all_fail_ts)
-        baseline_failure_eps = len(all_fail_ts) / max(1.0, (t1 - t0).total_seconds())
-
-    candidate_clusters = [cid for cid, s in stats.items() if s.get("is_candidate")]
-    # Pre-group failure rows once to avoid O(clusters * events) scans.
-    failure_rows_by_cluster: Dict[str, List[Tuple[datetime, Dict[str, Any]]]] = defaultdict(list)
-    for e in events:
-        if not _is_failure_event(e):
-            continue
-        ts = _parse_ts(e.get("timestamp"))
-        if not ts:
-            continue
-        eid = e.get("event_id")
-        cid = event_cluster_map.get(eid)
-        if cid:
-            failure_rows_by_cluster[cid].append((ts, e))
-
-    episodes: List[Dict[str, Any]] = []
-    for cid in candidate_clusters:
-        episodes.extend(
-            _build_episodes_for_cluster(
-                cluster_id=cid,
-                cluster_rows=failure_rows_by_cluster.get(cid, []),
-                intra_cluster_gap_seconds=intra_cluster_gap_seconds,
-                baseline_failure_eps=baseline_failure_eps,
-            )
-        )
-
-    episodes = [e for e in episodes if e["episode_score"] >= episode_score_threshold]
-    episodes.sort(key=lambda x: x["start"])
-
-    if not episodes:
+    windows = _build_cluster_windows(stats, cluster_window_cap_seconds)
+    if not windows:
         out: List[Dict[str, Any]] = []
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
@@ -197,40 +178,59 @@ def run_incident_detection_v2(
                 json.dump(
                     {
                         "status": "no_incident",
-                        "reason": "no_trigger_episodes",
-                        "candidate_clusters": len(candidate_clusters),
+                        "reason": "no_trigger_clusters",
+                        "candidate_clusters": 0,
                         "candidate_episodes": 0,
                         "incidents_count": 0,
                     },
                     f,
                     indent=2,
                 )
-        print("[incident_detection_v2] no trigger episodes found -> wrote empty incidents.json")
+        print("[incident_detection_v2] no trigger clusters found -> wrote empty incidents.json")
         return out
 
-    incidents: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
+    episodes = _build_episodes(
+        windows=windows,
+        episode_gap_seconds=episode_gap_seconds,
+        max_episode_duration_seconds=max_episode_duration_seconds,
+    )
+
+    # Merge episodes into incidents with deterministic multi-gate checks.
+    incidents: List[List[List[Dict[str, Any]]]] = []
+    current: List[List[Dict[str, Any]]] = []
     for ep in episodes:
         if not current:
             current = [ep]
             continue
-        last = current[-1]
-        cur_start = current[0]["start"]
-        new_end = max(last["end"], ep["end"])
-        cand_duration = int((new_end - cur_start).total_seconds())
-        temporal_ok = ep["start"] <= last["end"] + timedelta(seconds=max(1, inter_episode_gap_seconds))
+        last_ep = current[-1]
+        last_end = max(x["end"] for x in last_ep)
+        ep_start = min(x["start"] for x in ep)
+        temporal_ok = ep_start <= last_end + timedelta(seconds=max(1, gap_seconds))
 
-        cur_modes = set().union(*(set(x["failure_modes"]) for x in current))
-        nxt_modes = set(ep["failure_modes"])
-        semantic_ok = _jaccard(cur_modes, nxt_modes) >= semantic_jaccard_threshold
+        cur_start = min(x["start"] for seg in current for x in seg)
+        cand_end = max(max(x["end"] for x in seg) for seg in current + [ep])
+        cand_duration = int((cand_end - cur_start).total_seconds())
+        duration_ok = (
+            max_incident_duration_seconds <= 0
+            or cand_duration <= max_incident_duration_seconds
+        )
 
-        cur_deps = set().union(*(set(x["dependency_targets"]) for x in current))
-        nxt_deps = set(ep["dependency_targets"])
-        dep_ok = _jaccard(cur_deps, nxt_deps) >= 0.2 or (not cur_deps and not nxt_deps)
+        sig_cur = _episode_signature([x for seg in current for x in seg])
+        sig_ep = _episode_signature(ep)
+        mode_sim = _jaccard(sig_cur["modes"], sig_ep["modes"])
+        token_sim = _jaccard(sig_cur["tokens"], sig_ep["tokens"])
+        dep_sim = _jaccard(sig_cur["targets"], sig_ep["targets"])
+        semantic_ok = (
+            max(mode_sim, token_sim) >= semantic_jaccard_threshold
+            or dep_sim >= 0.2
+        )
 
-        duration_ok = cand_duration <= max_incident_duration_seconds
+        cur_score = max(1e-9, sig_cur["score_sum"])
+        ep_score = max(1e-9, sig_ep["score_sum"])
+        ratio = max(cur_score, ep_score) / min(cur_score, ep_score)
+        score_continuity_ok = ratio <= 8.0
 
-        if temporal_ok and semantic_ok and dep_ok and duration_ok:
+        if temporal_ok and duration_ok and semantic_ok and score_continuity_ok:
             current.append(ep)
         else:
             incidents.append(current)
@@ -238,19 +238,23 @@ def run_incident_detection_v2(
     if current:
         incidents.append(current)
 
+    # Flatten and build outputs.
     out: List[Dict[str, Any]] = []
-    for i, inc in enumerate(incidents, start=1):
-        start = min(x["start"] for x in inc)
-        end = max(x["end"] for x in inc)
+    for i, inc_eps in enumerate(incidents, start=1):
+        flat = [x for ep in inc_eps for x in ep]
+        start = min(x["start"] for x in flat)
+        end = max(x["end"] for x in flat)
         duration = int((end - start).total_seconds())
 
-        cluster_scores = defaultdict(float)
-        for ep in inc:
-            cluster_scores[ep["cluster_id"]] += float(ep["episode_score"])
-        ranked_clusters = sorted(cluster_scores.items(), key=lambda x: x[1], reverse=True)
+        score_by_cluster: Dict[str, float] = {}
+        for w in flat:
+            cid = w["cluster_id"]
+            score_by_cluster[cid] = score_by_cluster.get(cid, 0.0) + _safe_float(w["trigger_score"])
+        ranked_clusters = sorted(score_by_cluster.items(), key=lambda x: x[1], reverse=True)
+
         seed_clusters = [
             {"cluster_id": cid, "trigger_score": round(score, 6)}
-            for cid, score in ranked_clusters[:max(1, max_seeds)]
+            for cid, score in ranked_clusters[: max(1, max_seeds)]
         ]
         trigger_clusters = [cid for cid, _ in ranked_clusters]
 
@@ -266,19 +270,20 @@ def run_incident_detection_v2(
                 "all_clusters": trigger_clusters,
                 "cluster_count": len(trigger_clusters),
                 "incident_version": "v2",
-                "episode_count": len(inc),
+                "episode_count": len(inc_eps),
             }
         )
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
+
     if status_output_path:
         with open(status_output_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "status": "incident_detected",
                     "reason": "trigger_episodes_found",
-                    "candidate_clusters": len(candidate_clusters),
+                    "candidate_clusters": len(windows),
                     "candidate_episodes": len(episodes),
                     "incidents_count": len(out),
                 },
@@ -287,7 +292,7 @@ def run_incident_detection_v2(
             )
 
     print(
-        f"[incident_detection_v2] candidate_clusters={len(candidate_clusters)} "
+        f"[incident_detection_v2] candidate_clusters={len(windows)} "
         f"episodes={len(episodes)} incidents={len(out)} -> {output_path}"
     )
     return out

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 from collections import Counter
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Dict, List
 from _common import (
     CheckResult,
     file_exists,
+    load_index,
     load_json,
     load_jsonl,
     pass_fail,
@@ -19,10 +21,14 @@ from _common import (
 
 def step1_validate(outputs: Path, raw_log: Path | None) -> bool:
     results: List[CheckResult] = []
-    events_path = outputs / "events.jsonl"
+    events_path = outputs / "events.parquet"
+    label = "events.parquet"
+    if not file_exists(events_path):
+        events_path = outputs / "events.jsonl"
+        label = "events.jsonl"
     results.append(
         CheckResult(
-            name="events.jsonl exists",
+            name=f"{label} exists",
             compared=f"{events_path}",
             passed=file_exists(events_path),
             details="file present" if file_exists(events_path) else "missing",
@@ -34,15 +40,18 @@ def step1_validate(outputs: Path, raw_log: Path | None) -> bool:
     events = load_jsonl(events_path)
     results.append(
         CheckResult(
-            name="events.jsonl parseable",
-            compared="JSON decode for every line",
+            name=f"{label} parseable",
+            compared="row decode for every event",
             passed=True,
             details=f"parsed lines={len(events)}",
         )
     )
 
-    if raw_log and raw_log.exists() and raw_log.is_file():
-        raw_lines = sum(1 for _ in raw_log.open("r", encoding="utf-8", errors="replace"))
+    if raw_log:
+        raw_lines = _count_raw_log_lines(raw_log)
+    else:
+        raw_lines = None
+    if raw_lines is not None:
         ratio = (len(events) / max(1, raw_lines)) * 100.0
         exact_match = len(events) == raw_lines
         results.append(
@@ -61,13 +70,26 @@ def step1_validate(outputs: Path, raw_log: Path | None) -> bool:
                 details=f"events={len(events)}",
             )
         )
+    else:
+        results.append(
+            CheckResult(
+                name="Raw log availability for ingest comparison",
+                compared="raw log path exists and is countable",
+                passed=raw_log is None,
+                details="raw log not provided or not countable",
+            )
+        )
     return print_results("Step 1: Ingest", results)
 
 
 def step2_validate(outputs: Path) -> bool:
     results: List[CheckResult] = []
-    events_path = outputs / "events.jsonl"
-    index_path = outputs / "event_index.json"
+    events_path = outputs / "events.parquet"
+    if not file_exists(events_path):
+        events_path = outputs / "events.jsonl"
+    index_path = outputs / "event_index.parquet"
+    if not file_exists(index_path):
+        index_path = outputs / "event_index.json"
     emb_path = outputs / "event_embeddings.npy"
 
     for p in [events_path, index_path, emb_path]:
@@ -83,7 +105,7 @@ def step2_validate(outputs: Path) -> bool:
         return print_results("Step 2: Embed", results)
 
     events = load_jsonl(events_path)
-    index = load_json(index_path)
+    index = load_index(index_path)
     import numpy as np
 
     vec = np.load(emb_path)
@@ -119,7 +141,7 @@ def step2_validate(outputs: Path) -> bool:
     bad = {k: v for k, v in mismatches.items() if v > 0}
     results.append(
         CheckResult(
-            name="events.jsonl vs event_index field consistency",
+            name=f"{events_path.name} vs {index_path.name} field consistency",
             compared=f"fields={fields}",
             passed=len(bad) == 0,
             details=f"mismatches={bad if bad else 'none'}",
@@ -143,10 +165,77 @@ def _validate_exists_group(step_name: str, files: List[Path]) -> bool:
 
 
 def step3_validate(outputs: Path) -> bool:
-    return _validate_exists_group(
+    ok = _validate_exists_group(
         "Step 3: Cluster",
         [outputs / "clusters.json", outputs / "event_cluster_map.json", outputs / "clusters_stats.json"],
     )
+    clusters_path = outputs / "clusters.json"
+    map_path = outputs / "event_cluster_map.json"
+    events_path = outputs / "events.parquet"
+    if not file_exists(events_path):
+        events_path = outputs / "events.jsonl"
+    if not (ok and file_exists(clusters_path) and file_exists(map_path) and file_exists(events_path)):
+        return ok
+
+    clusters = load_json(clusters_path)
+    event_cluster_map = load_json(map_path)
+    events = load_jsonl(events_path)
+
+    cluster_ids = set(clusters.keys()) if isinstance(clusters, dict) else set()
+    event_ids = {e.get("event_id") for e in events if e.get("event_id")}
+
+    unknown_event_ids = []
+    unknown_cluster_ids = []
+    out_of_range_members = 0
+    invalid_member_type = 0
+
+    if isinstance(event_cluster_map, dict):
+        for eid, cid in event_cluster_map.items():
+            if eid not in event_ids:
+                unknown_event_ids.append(eid)
+                if len(unknown_event_ids) >= 5:
+                    break
+            if cid not in cluster_ids:
+                unknown_cluster_ids.append(cid)
+                if len(unknown_cluster_ids) >= 5:
+                    break
+
+    if isinstance(clusters, dict):
+        n = len(events)
+        for c in clusters.values():
+            if not isinstance(c, dict):
+                continue
+            members = c.get("member_indices")
+            if not isinstance(members, list):
+                continue
+            for idx in members:
+                if not isinstance(idx, int):
+                    invalid_member_type += 1
+                    continue
+                if idx < 0 or idx >= n:
+                    out_of_range_members += 1
+
+    results = [
+        CheckResult(
+            name="Event-cluster map keys are valid event IDs",
+            compared="event_cluster_map.keys() subset of events.event_id",
+            passed=len(unknown_event_ids) == 0,
+            details=f"unknown_event_ids_sample={unknown_event_ids if unknown_event_ids else 'none'}",
+        ),
+        CheckResult(
+            name="Event-cluster map values are valid cluster IDs",
+            compared="event_cluster_map.values() subset of clusters.keys()",
+            passed=len(unknown_cluster_ids) == 0,
+            details=f"unknown_cluster_ids_sample={unknown_cluster_ids if unknown_cluster_ids else 'none'}",
+        ),
+        CheckResult(
+            name="Cluster member indices in bounds",
+            compared="all cluster.member_indices in [0, len(events)-1] and int",
+            passed=(out_of_range_members == 0 and invalid_member_type == 0),
+            details=f"out_of_range={out_of_range_members}, invalid_type={invalid_member_type}",
+        ),
+    ]
+    return print_results("Step 3: Cluster (content)", results) and ok
 
 
 def step4_validate(outputs: Path) -> bool:
@@ -217,13 +306,48 @@ def _incident_mode(outputs: Path) -> str:
     return "no_incident" if status == "no_incident" else "incident"
 
 
+def _count_lines_in_file(path: Path) -> int:
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+            return sum(1 for _ in f)
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        return sum(1 for _ in f)
+
+
+def _count_raw_log_lines(raw_log: Path) -> int | None:
+    if not raw_log.exists():
+        return None
+    if raw_log.is_file():
+        return _count_lines_in_file(raw_log)
+    if raw_log.is_dir():
+        # Common raw log shapes:
+        # - log/*.log
+        # - log/*.log.gz
+        # - nested source drops
+        candidates = sorted(
+            [
+                p
+                for p in raw_log.rglob("*")
+                if p.is_file() and (p.suffix in {".log", ".jsonl", ".txt", ".gz"})
+            ]
+        )
+        if not candidates:
+            return None
+        return sum(_count_lines_in_file(p) for p in candidates)
+    return None
+
+
 def _build_detailed_stats(outputs: Path, raw_log: Path | None, compat_v142: bool) -> Dict[str, object]:
     stats: Dict[str, object] = {
         "compat_v142": compat_v142,
     }
 
-    events_path = outputs / "events.jsonl"
-    index_path = outputs / "event_index.json"
+    events_path = outputs / "events.parquet"
+    if not file_exists(events_path):
+        events_path = outputs / "events.jsonl"
+    index_path = outputs / "event_index.parquet"
+    if not file_exists(index_path):
+        index_path = outputs / "event_index.json"
     emb_path = outputs / "event_embeddings.npy"
     trigger_path = outputs / "cluster_trigger_stats.json"
     status_path = outputs / "incident_detection_status.json"
@@ -234,14 +358,16 @@ def _build_detailed_stats(outputs: Path, raw_log: Path | None, compat_v142: bool
         total = len(events)
         fields = ["service", "actor", "verb", "resource", "path", "stage", "response_code", "http_class", "status_family"]
         null_counts: Dict[str, int] = {f: 0 for f in fields}
-        codes = Counter()
+        code_classes = Counter()
         for e in events:
             for f in fields:
                 if e.get(f) is None:
                     null_counts[f] += 1
             rc = e.get("response_code")
             if isinstance(rc, int):
-                codes[rc] += 1
+                cls = f"{rc // 100}xx"
+                if cls in {"2xx", "4xx", "5xx"}:
+                    code_classes[cls] += 1
         null_pct = {f: round((null_counts[f] / total) * 100.0, 4) if total else 0.0 for f in fields}
         coverage_pct = {f: round(100.0 - null_pct[f], 4) for f in fields}
         ingest_stats: Dict[str, object] = {
@@ -250,20 +376,21 @@ def _build_detailed_stats(outputs: Path, raw_log: Path | None, compat_v142: bool
             "field_null_percent": null_pct,
             "field_non_null_percent": coverage_pct,
             "response_code_counts": {
-                "200": codes[200],
-                "403": codes[403],
-                "500": codes[500],
+                "2xx": code_classes["2xx"],
+                "4xx": code_classes["4xx"],
+                "5xx": code_classes["5xx"],
             },
         }
-        if raw_log and raw_log.exists() and raw_log.is_file():
-            raw_lines = sum(1 for _ in raw_log.open("r", encoding="utf-8", errors="replace"))
-            ingest_stats["raw_log_lines"] = raw_lines
-            ingest_stats["events_vs_raw_ratio_percent"] = round((total / max(1, raw_lines)) * 100.0, 4)
-            ingest_stats["events_equals_raw_lines"] = total == raw_lines
+        if raw_log:
+            raw_lines = _count_raw_log_lines(raw_log)
+            if raw_lines is not None:
+                ingest_stats["raw_log_lines"] = raw_lines
+                ingest_stats["events_vs_raw_ratio_percent"] = round((total / max(1, raw_lines)) * 100.0, 4)
+                ingest_stats["events_equals_raw_lines"] = total == raw_lines
         stats["ingest"] = ingest_stats
 
     if file_exists(index_path):
-        idx = load_json(index_path)
+        idx = load_index(index_path)
         stats["embed"] = {"index_count": len(idx)}
         if file_exists(emb_path):
             import numpy as np
@@ -501,7 +628,7 @@ def main() -> None:
                         f"- Raw log lines: `{ingest.get('raw_log_lines')}`" if "raw_log_lines" in ingest else "- Raw log lines: `n/a`",
                         f"- Events/raw ratio: `{ingest.get('events_vs_raw_ratio_percent', 'n/a')}%`",
                         f"- Exact raw==events: `{ingest.get('events_equals_raw_lines', 'n/a')}`",
-                        f"- Response codes: `200={ingest.get('response_code_counts', {}).get('200', 0)}` `403={ingest.get('response_code_counts', {}).get('403', 0)}` `500={ingest.get('response_code_counts', {}).get('500', 0)}`",
+                        f"- Response classes: `2xx={ingest.get('response_code_counts', {}).get('2xx', 0)}` `4xx={ingest.get('response_code_counts', {}).get('4xx', 0)}` `5xx={ingest.get('response_code_counts', {}).get('5xx', 0)}`",
                         "",
                         "### Non-Null Coverage (%)",
                         "",

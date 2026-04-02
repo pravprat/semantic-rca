@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from datetime import datetime, timedelta
+from event_io import load_events
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -39,13 +40,7 @@ def _load_json(path: Path) -> Any:
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+    return load_events(path)
 
 
 def _incident_map(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -336,6 +331,23 @@ def _compute_post_anomaly_impacts(
     top_modes = sorted(mode_counts.items(), key=lambda x: x[1], reverse=True)[:8]
     top_components = sorted(component_counts.items(), key=lambda x: x[1], reverse=True)[:8]
     top_dep_edges = sorted(dep_edges.values(), key=lambda x: int(x.get("count", 0)), reverse=True)[:10]
+    primary_dep = None
+    secondary_deps: List[Dict[str, Any]] = []
+    if top_dep_edges:
+        # Primary dependency impact ranking: earliest first, then highest count.
+        ranked = sorted(
+            top_dep_edges,
+            key=lambda x: (
+                _parse_ts(x.get("first_seen")) is None,
+                _parse_ts(x.get("first_seen")),
+                -int(x.get("count", 0)),
+            ),
+        )
+        primary_dep = dict(ranked[0])
+        primary_dep["impact_rank"] = "primary"
+        secondary_deps = [dict(x) for x in ranked[1:]]
+        for r in secondary_deps:
+            r["impact_rank"] = "secondary"
 
     # Pre/post failure lift.
     pre_fail = 0
@@ -374,6 +386,33 @@ def _compute_post_anomaly_impacts(
 
     pre_window_fail = [e for e in pre_window if _is_failure_event(e)]
     post_window_fail = [e for e in post_window if _is_failure_event(e)]
+    fixed_pre_5xx_count = 0
+    fixed_post_5xx_count = 0
+    for e in pre_window:
+        rc = e.get("response_code")
+        try:
+            if int(rc) >= 500:
+                fixed_pre_5xx_count += 1
+        except Exception:
+            continue
+    for e in post_window:
+        rc = e.get("response_code")
+        try:
+            if int(rc) >= 500:
+                fixed_post_5xx_count += 1
+        except Exception:
+            continue
+    first_5xx_fixed_post_ts = None
+    for e in post_window:
+        rc = e.get("response_code")
+        try:
+            if int(rc) >= 500:
+                ts = _parse_ts(e.get("timestamp"))
+                if ts and (first_5xx_fixed_post_ts is None or ts < first_5xx_fixed_post_ts):
+                    first_5xx_fixed_post_ts = ts
+        except Exception:
+            continue
+
     pre_window_seconds = float(n * 60)
     post_window_seconds = float(n * 60)
     pre_window_rate = _safe_rate(len(pre_window_fail), pre_window_seconds)
@@ -433,7 +472,8 @@ def _compute_post_anomaly_impacts(
     summary = (
         f"After root anomaly at {anomaly_onset.get('first_anomaly_timestamp')}, "
         f"{len(failure_events)} failure events were observed in-window; "
-        f"5xx first appeared at {first_5xx_ts.isoformat() if first_5xx_ts else 'not observed'}."
+        f"first 5xx in incident window={first_5xx_ts.isoformat() if first_5xx_ts else 'not observed'}, "
+        f"first 5xx in fixed +{n}m window={first_5xx_fixed_post_ts.isoformat() if first_5xx_fixed_post_ts else 'not observed'}."
     )
 
     return {
@@ -443,6 +483,12 @@ def _compute_post_anomaly_impacts(
         "failure_events_after_anomaly": len(failure_events),
         "first_5xx_timestamp": first_5xx_ts.isoformat() if first_5xx_ts else None,
         "first_5xx_delta_seconds": first_5xx_delta,
+        "first_5xx_timestamp_fixed_post_window": (
+            first_5xx_fixed_post_ts.isoformat() if first_5xx_fixed_post_ts else None
+        ),
+        "first_5xx_delta_seconds_fixed_post_window": (
+            round((first_5xx_fixed_post_ts - t0).total_seconds(), 3) if first_5xx_fixed_post_ts else None
+        ),
         "status_class_counts_after_anomaly": status_counts,
         "failure_domain_breakdown_after_anomaly": [{"failure_mode": k, "count": v} for k, v in top_modes],
         "component_failure_breakdown_after_anomaly": [
@@ -451,6 +497,8 @@ def _compute_post_anomaly_impacts(
         "service_failure_breakdown_after_anomaly": [{"service": k, "count": v} for k, v in top_services],
         "resource_failure_breakdown_after_anomaly": [{"resource": k, "count": v} for k, v in top_resources],
         "observed_dependency_impacts_after_anomaly": top_dep_edges,
+        "primary_dependency_impact": primary_dep,
+        "secondary_dependency_impacts": secondary_deps,
         "pre_vs_post_failure_lift": {
             "pre_window_seconds": round(pre_seconds, 3),
             "post_window_seconds": round(post_seconds, 3),
@@ -465,6 +513,8 @@ def _compute_post_anomaly_impacts(
             "fixed_window_end_post": post_end.isoformat(),
             "fixed_pre_failure_count": len(pre_window_fail),
             "fixed_post_failure_count": len(post_window_fail),
+            "fixed_pre_5xx_count": fixed_pre_5xx_count,
+            "fixed_post_5xx_count": fixed_post_5xx_count,
             "fixed_pre_failure_rate_eps": round(pre_window_rate, 6),
             "fixed_post_failure_rate_eps": round(post_window_rate, 6),
             "fixed_overall_lift_ratio": _format_lift(pre_window_rate, post_window_rate),

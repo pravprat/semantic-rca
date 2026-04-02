@@ -53,6 +53,17 @@ def _recommended_actions(summary: Dict[str, Any]) -> List[str]:
     return actions
 
 
+def _symptom_type(summary: Dict[str, Any]) -> str:
+    pattern = str(summary.get("pattern") or "").lower()
+    if "authorization" in pattern or "rbac" in pattern:
+        return "authorization denials and access failures"
+    if "resource" in pattern and "not_found" in pattern:
+        return "resource availability and reconciliation failures"
+    if "service" in pattern or "5xx" in pattern:
+        return "service/API reliability failures"
+    return "mixed API-level failures"
+
+
 def build_detailed_report_json(
     base_report_path: Path,
     evidence_bundle_path: Path,
@@ -130,6 +141,22 @@ def render_detailed_markdown(
         if rpt.get("explanation"):
             lines.append(rpt.get("explanation") + "\n")
 
+        lines.append("## What Broke (Symptoms)\n")
+        lines.append(f"- Symptom family: **{_symptom_type(summary)}**")
+        lines.append(
+            f"- Primary observed symptom: response_code=`{summary.get('primary_response_code')}`, "
+            f"actor=`{summary.get('primary_actor')}`, resource=`{summary.get('primary_resource')}`"
+        )
+        lines.append("- Downstream effects are listed in post-anomaly impact timelines below.\n")
+
+        lines.append("## Likely Root Cause (Hypothesis)\n")
+        lines.append(
+            f"- Hypothesized root source: cluster `{summary.get('primary_cluster_id')}` with pattern `{summary.get('pattern')}`."
+        )
+        lines.append(
+            "- This is a probabilistic RCA claim, not absolute proof; confidence and evidence coverage are shown below.\n"
+        )
+
         lines.append("## Support Impact Summary\n")
         chain = forensic.get("chain_summary", {})
         complexity = _complexity_label(chain.get("all_graph_edges"))
@@ -156,6 +183,13 @@ def render_detailed_markdown(
         lines.append(f"- **Failure events after anomaly:** {impacts.get('failure_events_after_anomaly')}")
         lines.append(f"- **First 5xx observed at:** {impacts.get('first_5xx_timestamp')}")
         lines.append(f"- **Delta t0 -> first 5xx:** {impacts.get('first_5xx_delta_seconds')} seconds")
+        lines.append(
+            f"- **First 5xx in fixed post window:** {impacts.get('first_5xx_timestamp_fixed_post_window')}"
+        )
+        lines.append(
+            f"- **Delta t0 -> first 5xx (fixed post window):** "
+            f"{impacts.get('first_5xx_delta_seconds_fixed_post_window')} seconds"
+        )
         if impacts.get("summary"):
             lines.append(f"- **Summary:** {impacts.get('summary')}")
         status_counts = impacts.get("status_class_counts_after_anomaly", {})
@@ -186,6 +220,23 @@ def render_detailed_markdown(
                     f"source_domain={src_meta.get('domain')}, target_domain={tgt_meta.get('domain')}, "
                     f"target_system={tgt_meta.get('system')}, target_owner_hint={tgt_meta.get('owner_hint')})"
                 )
+        primary_dep = impacts.get("primary_dependency_impact")
+        if isinstance(primary_dep, dict) and primary_dep:
+            lines.append("- **Primary dependency impact (ranked):**")
+            lines.append(
+                f"  - {primary_dep.get('source_service')} -> {primary_dep.get('target_service')} "
+                f"(count={primary_dep.get('count')}, first_seen={primary_dep.get('first_seen')}, "
+                f"rank={primary_dep.get('impact_rank')}, confidence_tier={primary_dep.get('causal_confidence_tier')})"
+            )
+        secondary_dep = impacts.get("secondary_dependency_impacts", [])
+        if isinstance(secondary_dep, list) and secondary_dep:
+            lines.append("- **Secondary dependency impacts (ranked):**")
+            for row in secondary_dep[:5]:
+                lines.append(
+                    f"  - {row.get('source_service')} -> {row.get('target_service')} "
+                    f"(count={row.get('count')}, first_seen={row.get('first_seen')}, "
+                    f"rank={row.get('impact_rank')}, confidence_tier={row.get('causal_confidence_tier')})"
+                )
         lift = impacts.get("pre_vs_post_failure_lift", {})
         if isinstance(lift, dict) and lift:
             lines.append("- **Pre vs post anomaly failure degradation:**")
@@ -197,6 +248,7 @@ def render_detailed_markdown(
             lines.append(
                 f"  - fixed_window={lift.get('fixed_window_minutes')}m pre/post around t0: "
                 f"pre_count={lift.get('fixed_pre_failure_count')}, post_count={lift.get('fixed_post_failure_count')}, "
+                f"pre_5xx={lift.get('fixed_pre_5xx_count')}, post_5xx={lift.get('fixed_post_5xx_count')}, "
                 f"pre_rate={lift.get('fixed_pre_failure_rate_eps')} eps, post_rate={lift.get('fixed_post_failure_rate_eps')} eps, "
                 f"overall_lift={lift.get('fixed_overall_lift_ratio')}"
             )

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, List
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from event_io import load_events, is_parquet_path
 
 
 @dataclass
@@ -20,13 +27,13 @@ def load_json(path: Path) -> Any:
 
 
 def load_jsonl(path: Path) -> List[dict]:
-    out: List[dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+    return load_events(path)
+
+
+def load_index(path: Path) -> List[dict]:
+    if is_parquet_path(path):
+        return load_events(path)
+    return load_json(path)
 
 
 def file_exists(path: Path) -> bool:
