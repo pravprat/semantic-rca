@@ -71,6 +71,31 @@ def _extract_actor_resource_tokens(stat: Dict[str, Any]) -> Set[str]:
     return out
 
 
+def _top_mode(stat: Dict[str, Any]) -> str:
+    rows = stat.get("top_failure_modes", []) or []
+    if rows and isinstance(rows[0], dict):
+        return str(rows[0].get("mode") or "unknown")
+    return "unknown"
+
+
+def _classify_incident(modes: Set[str], tokens: Set[str], targets: Set[str]) -> str:
+    mtxt = " ".join(sorted(modes)).lower()
+    ttxt = " ".join(sorted(tokens)).lower()
+    if any(k in mtxt for k in ("auth", "authz", "token", "cert", "forbidden", "permission")):
+        return "security_access"
+    if any(k in mtxt for k in ("oom", "evict", "disk", "memory", "resource", "pressure", "quota")):
+        return "capacity_resource"
+    if any(k in mtxt for k in ("timeout", "latency", "throttl", "queue")):
+        return "performance_latency"
+    if targets:
+        return "dependency_propagation"
+    if any(k in mtxt for k in ("service_failure", "connection", "refused", "unavailable", "5xx")):
+        return "availability_outage"
+    if any(k in ttxt for k in ("resource:",)):
+        return "correctness_data"
+    return "unknown_technical"
+
+
 def _build_cluster_windows(
     stats: Dict[str, Any],
     cluster_window_cap_seconds: int,
@@ -238,8 +263,11 @@ def run_incident_detection_v2(
     if current:
         incidents.append(current)
 
-    # Flatten and build outputs.
+    # Flatten and build outputs with policy/suppression/confidence.
     out: List[Dict[str, Any]] = []
+    possible_count = 0
+    suppressed_count = 0
+    suppressed_reasons: Dict[str, int] = {}
     for i, inc_eps in enumerate(incidents, start=1):
         flat = [x for ep in inc_eps for x in ep]
         start = min(x["start"] for x in flat)
@@ -258,6 +286,81 @@ def run_incident_detection_v2(
         ]
         trigger_clusters = [cid for cid, _ in ranked_clusters]
 
+        # Aggregate policy features from step4 stats.
+        stats_rows = [w["stat"] for w in flat]
+        failure_modes: Set[str] = set()
+        dep_targets: Set[str] = set()
+        art_tokens: Set[str] = set()
+        error_count = 0
+        event_count = 0
+        coverage_scores: List[float] = []
+        suppression_ratio_sum = 0.0
+        recovery_strength_sum = 0.0
+        service_spread = 0
+        for s in stats_rows:
+            failure_modes |= _extract_modes(s)
+            dep_targets |= _extract_targets(s)
+            art_tokens |= _extract_actor_resource_tokens(s)
+            error_count += int(s.get("error_count") or 0)
+            event_count += int(s.get("event_count") or 0)
+            coverage_scores.append(_safe_float(((s.get("signal_quality") or {}).get("coverage_score")), 0.0))
+            suppression_ratio_sum += _safe_float(((s.get("suppression_hints") or {}).get("ratio")), 0.0)
+            recovery_strength_sum += _safe_float(((s.get("recovery_signals") or {}).get("recovery_strength")), 0.0)
+            service_spread += int((((s.get("service_spread") or {}).get("distinct_services")) or 0))
+
+        cluster_count = len(flat)
+        avg_coverage = (sum(coverage_scores) / max(1, len(coverage_scores)))
+        avg_suppression_ratio = suppression_ratio_sum / max(1, cluster_count)
+        avg_recovery_strength = recovery_strength_sum / max(1, cluster_count)
+        avg_service_spread = service_spread / max(1, cluster_count)
+        error_ratio = error_count / max(1, event_count)
+
+        incident_class = _classify_incident(failure_modes, art_tokens, dep_targets)
+        declaration = "incident"
+        suppression_reason: Optional[str] = None
+
+        # Suppression policy: suppress clusters that look like planned/noisy churn
+        # with weak failure intensity.
+        if avg_suppression_ratio >= 0.4 and error_ratio < 0.25:
+            declaration = "suppressed"
+            suppression_reason = "high_suppression_hints_low_failure_ratio"
+        elif duration < 45 and error_count < 6:
+            declaration = "possible_incident"
+
+        # Policy confidence score (0..1).
+        score_norm = min(1.0, sum(score_by_cluster.values()) / max(1.0, float(len(flat))))
+        persistence = min(1.0, duration / 900.0)
+        coherence = max(
+            min(1.0, len(failure_modes) / 4.0),
+            min(1.0, len(dep_targets) / 3.0),
+            min(1.0, len(art_tokens) / 6.0),
+        )
+        confidence_score = (
+            0.30 * score_norm
+            + 0.20 * persistence
+            + 0.20 * avg_coverage
+            + 0.20 * min(1.0, error_ratio * 3.0)
+            + 0.10 * coherence
+        )
+        confidence_score *= (1.0 - 0.35 * min(1.0, avg_recovery_strength))
+        confidence_score = round(max(0.0, min(1.0, confidence_score)), 6)
+        if confidence_score >= 0.65:
+            confidence_level = "high"
+        elif confidence_score >= 0.45:
+            confidence_level = "medium"
+        else:
+            confidence_level = "low"
+        if declaration == "incident" and confidence_level == "low":
+            declaration = "possible_incident"
+
+        if declaration == "suppressed":
+            suppressed_count += 1
+            key = suppression_reason or "suppressed_policy"
+            suppressed_reasons[key] = suppressed_reasons.get(key, 0) + 1
+            continue
+        if declaration == "possible_incident":
+            possible_count += 1
+
         out.append(
             {
                 "incident_id": f"I{i}",
@@ -271,6 +374,19 @@ def run_incident_detection_v2(
                 "cluster_count": len(trigger_clusters),
                 "incident_version": "v2",
                 "episode_count": len(inc_eps),
+                "incident_class": incident_class,
+                "declaration": declaration,
+                "policy_summary": {
+                    "error_ratio": round(error_ratio, 6),
+                    "avg_signal_coverage": round(avg_coverage, 6),
+                    "avg_suppression_ratio": round(avg_suppression_ratio, 6),
+                    "avg_recovery_strength": round(avg_recovery_strength, 6),
+                    "avg_service_spread": round(avg_service_spread, 6),
+                },
+                "confidence": {
+                    "score": confidence_score,
+                    "level": confidence_level,
+                },
             }
         )
 
@@ -278,14 +394,23 @@ def run_incident_detection_v2(
         json.dump(out, f, indent=2)
 
     if status_output_path:
+        status = "incident_detected" if out else "no_incident"
+        reason = "trigger_episodes_found"
+        if out and possible_count == len(out):
+            reason = "possible_incidents_only"
+        if not out and suppressed_count > 0:
+            reason = "all_candidates_suppressed"
         with open(status_output_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "status": "incident_detected",
-                    "reason": "trigger_episodes_found",
+                    "status": status,
+                    "reason": reason,
                     "candidate_clusters": len(windows),
                     "candidate_episodes": len(episodes),
                     "incidents_count": len(out),
+                    "possible_incidents_count": possible_count,
+                    "suppressed_count": suppressed_count,
+                    "suppressed_reasons": suppressed_reasons,
                 },
                 f,
                 indent=2,

@@ -81,10 +81,17 @@ def build_detailed_report_json(
 
         entry = dict(report)
         entry["report_version"] = "detailed_v1"
+        incident_meta = report.get("incident_metadata", {}) if isinstance(report.get("incident_metadata"), dict) else {}
         entry["evidence_bundle_ref"] = {
             "incident_id": iid,
             "bundle_version": bundle.get("bundle_version"),
             "coverage": bundle.get("coverage", {}),
+        }
+        entry["incident_policy"] = {
+            "incident_class": incident_meta.get("incident_class"),
+            "declaration": incident_meta.get("declaration"),
+            "episode_count": incident_meta.get("episode_count"),
+            "policy_summary": incident_meta.get("policy_summary", {}),
         }
         entry["forensic_details"] = {
             "claims": bundle.get("claims", []),
@@ -116,6 +123,7 @@ def render_detailed_markdown(
         conf = rpt.get("confidence", {})
         evidence_ref = rpt.get("evidence_bundle_ref", {})
         forensic = rpt.get("forensic_details", {})
+        policy = rpt.get("incident_policy", {})
         pattern = summary.get("pattern")
 
         lines.append(f"# Incident {iid}\n")
@@ -140,6 +148,11 @@ def render_detailed_markdown(
         )
         if rpt.get("explanation"):
             lines.append(rpt.get("explanation") + "\n")
+        lines.append(
+            f"- Detection declaration: `{policy.get('declaration') or 'incident'}`; "
+            f"class: `{policy.get('incident_class') or 'unknown_technical'}`; "
+            f"episodes: `{policy.get('episode_count')}`.\n"
+        )
 
         lines.append("## What Broke (Symptoms)\n")
         lines.append(f"- Symptom family: **{_symptom_type(summary)}**")

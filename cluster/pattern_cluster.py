@@ -15,7 +15,7 @@ class PatternCluster:
     representative_index: int
 
 
-def cluster_patterns(vectors: np.ndarray, min_cluster_size: int = 15) -> Dict[str, PatternCluster]:
+def _cluster_patterns_hdbscan_or_fallback(vectors: np.ndarray, min_cluster_size: int = 15) -> Dict[str, PatternCluster]:
 
     # ------------------------------------------------
     # Memory safety
@@ -116,6 +116,65 @@ def cluster_patterns(vectors: np.ndarray, min_cluster_size: int = 15) -> Dict[st
         )
 
     return out
+
+
+def _cluster_patterns_fast_kmeans(
+    vectors: np.ndarray,
+    min_cluster_size: int = 15,
+    max_clusters: int = 300,
+) -> Dict[str, PatternCluster]:
+    """
+    Fast clustering mode for large datasets.
+    Uses MiniBatchKMeans for bounded runtime, then filters small clusters.
+    """
+    try:
+        from sklearn.cluster import MiniBatchKMeans
+    except Exception as e:
+        raise RuntimeError("Need scikit-learn for fast clustering mode.") from e
+
+    n = len(vectors)
+    # Keep cluster count bounded and tied to dataset size.
+    # This prioritizes runtime stability over fine-grained cluster purity.
+    n_clusters = max(8, min(max_clusters, n // max(min_cluster_size * 6, 60)))
+    n_clusters = min(n_clusters, max(1, n))
+
+    model = MiniBatchKMeans(
+        n_clusters=n_clusters,
+        random_state=42,
+        batch_size=4096,
+        n_init="auto",
+        max_iter=120,
+    )
+    labels = model.fit_predict(vectors)
+
+    clusters: Dict[int, List[int]] = {}
+    for idx, lab in enumerate(labels):
+        clusters.setdefault(int(lab), []).append(idx)
+
+    out: Dict[str, PatternCluster] = {}
+    for lab, members in clusters.items():
+        if len(members) < min_cluster_size:
+            continue
+        rep = _choose_representative(vectors, members)
+        cid = f"C{lab}"
+        out[cid] = PatternCluster(
+            cluster_id=cid,
+            member_indices=members,
+            size=len(members),
+            representative_index=rep,
+        )
+    return out
+
+
+def cluster_patterns(
+    vectors: np.ndarray,
+    min_cluster_size: int = 15,
+    mode: str = "standard",
+) -> Dict[str, PatternCluster]:
+
+    if mode == "fast":
+        return _cluster_patterns_fast_kmeans(vectors, min_cluster_size=min_cluster_size)
+    return _cluster_patterns_hdbscan_or_fallback(vectors, min_cluster_size=min_cluster_size)
 
 
 def _choose_representative(vectors: np.ndarray, members: List[int]) -> int:

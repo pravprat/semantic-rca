@@ -644,6 +644,14 @@ def build_evidence_bundle(
         bundle = {
             "incident_id": iid,
             "bundle_version": "1.0",
+            "incident_metadata": {
+                "incident_version": inc.get("incident_version"),
+                "episode_count": inc.get("episode_count"),
+                "incident_class": inc.get("incident_class"),
+                "declaration": inc.get("declaration"),
+                "confidence": inc.get("confidence"),
+                "policy_summary": inc.get("policy_summary"),
+            },
             "lineage": {
                 "incidents_path": str(incidents_path),
                 "candidates_path": str(candidates_path),

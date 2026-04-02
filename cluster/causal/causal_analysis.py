@@ -175,6 +175,13 @@ def run_causal_analysis(
         graph_output.append({
             "incident_id": inc["incident_id"],
             "causal_graph_version": "1.1",
+            "incident_metadata": {
+                "incident_version": inc.get("incident_version"),
+                "episode_count": inc.get("episode_count"),
+                "incident_class": inc.get("incident_class"),
+                "declaration": inc.get("declaration"),
+                "confidence": inc.get("confidence"),
+            },
             "nodes": [
                 {
                     "cluster_id": p.cluster_id,
@@ -206,6 +213,11 @@ def run_causal_analysis(
         candidate_output.append({
             "incident_id": inc["incident_id"],
             "root_candidate_version": "1.1",
+            "incident_metadata": {
+                "incident_class": inc.get("incident_class"),
+                "declaration": inc.get("declaration"),
+                "incident_confidence": inc.get("confidence"),
+            },
             "candidates": [
                 {
                     "cluster_id": c.cluster_id,
@@ -226,7 +238,10 @@ def run_causal_analysis(
         # -------------------------
 
         if enable_grounding:
-            top_clusters = [c.cluster_id for c in candidates[:3]]
+            top_k = 3
+            if str(inc.get("declaration") or "") == "possible_incident":
+                top_k = 2
+            top_clusters = [c.cluster_id for c in candidates[:top_k]]
 
             root_events = resolver.resolve(
                 incident=inc,
@@ -235,6 +250,10 @@ def run_causal_analysis(
 
             grounded_output.append({
                 "incident_id": inc["incident_id"],
+                "incident_metadata": {
+                    "incident_class": inc.get("incident_class"),
+                    "declaration": inc.get("declaration"),
+                },
                 "root_events": root_events,
             })
 

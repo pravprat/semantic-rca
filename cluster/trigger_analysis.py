@@ -65,6 +65,10 @@ def run_trigger_analysis(
     cluster_field_coverage = defaultdict(lambda: Counter())
     cluster_actors = defaultdict(Counter)
     cluster_resources = defaultdict(Counter)
+    cluster_services = defaultdict(Counter)
+    cluster_suppression_hints = defaultdict(Counter)
+    cluster_recovery_counts = defaultdict(lambda: {"failure_to_success": 0, "retry_hints": 0, "recovered_hints": 0})
+    cluster_ts_flags = defaultdict(list)
 
     for e in events:
 
@@ -119,6 +123,31 @@ def run_trigger_analysis(
                 if failure_hint:
                     cluster_failure_hints[cid][str(failure_hint)] += 1
 
+        # Suppression and recovery hint extraction for policy-aware incident detection.
+        msg = str(
+            e.get("message")
+            or e.get("msg")
+            or e.get("log")
+            or e.get("reason")
+            or ""
+        ).lower()
+        hint_text = str(e.get("failure_hint") or "").lower()
+        path_text = str(e.get("path") or "").lower()
+        res_text = str(e.get("resource") or "").lower()
+        token_text = " ".join([msg, hint_text, path_text, res_text])
+        if any(k in token_text for k in ("startup", "boot", "warmup", "initializing")):
+            cluster_suppression_hints[cid]["startup"] += 1
+        if any(k in token_text for k in ("deploy", "rollout", "deployment", "upgrading")):
+            cluster_suppression_hints[cid]["deploy"] += 1
+        if any(k in token_text for k in ("maintenance", "drain", "cordon", "planned")):
+            cluster_suppression_hints[cid]["maintenance"] += 1
+        if any(k in token_text for k in ("health", "liveness", "readiness", "probe")):
+            cluster_suppression_hints[cid]["healthcheck"] += 1
+        if "retry" in token_text or "backoff" in token_text:
+            cluster_recovery_counts[cid]["retry_hints"] += 1
+        if any(k in token_text for k in ("recovered", "recovery", "restored", "stabilized")):
+            cluster_recovery_counts[cid]["recovered_hints"] += 1
+
         # failure mode aggregation
         sem = e.get("semantic") if isinstance(e.get("semantic"), dict) else {}
         mode = str((sem or {}).get("failure_mode") or "").strip()
@@ -160,9 +189,7 @@ def run_trigger_analysis(
             except Exception:
                 pass
 
-        # ------------------------
-        # ✅ NEW: Actor tracking
-        # ------------------------
+        # Actor/resource/service tracking
         actor = e.get("actor") or e.get("service")
         if actor:
             cluster_actors[cid][actor] += 1
@@ -170,6 +197,18 @@ def run_trigger_analysis(
         resource = e.get("resource")
         if resource:
             cluster_resources[cid][resource] += 1
+        service = e.get("service")
+        if service:
+            cluster_services[cid][str(service)] += 1
+
+        # Track per-event failure/success transitions for recovery strength.
+        is_failure = (rc >= 400) or (str(e.get("status_family") or "").lower() == "failure")
+        is_success = (rc >= 200 and rc < 400) or (str(e.get("status_family") or "").lower() == "success")
+        if ts:
+            try:
+                cluster_ts_flags[cid].append((_parse_ts(ts), bool(is_failure), bool(is_success)))
+            except Exception:
+                pass
 
     # -------------------------------------
     # Compute trigger metrics
@@ -283,6 +322,24 @@ def run_trigger_analysis(
         if field_cov_ratios["response_code"] < 0.1:
             low_flags.append("low_response_code_coverage")
 
+        # Recovery transition strength: fraction of failure->success transitions.
+        failure_to_success = 0
+        ts_rows = sorted(cluster_ts_flags[cid], key=lambda x: x[0])
+        for idx in range(1, len(ts_rows)):
+            prev = ts_rows[idx - 1]
+            cur = ts_rows[idx]
+            if prev[1] and cur[2]:
+                failure_to_success += 1
+        cluster_recovery_counts[cid]["failure_to_success"] = failure_to_success
+        recovery_strength = 0.0
+        if errors > 0:
+            recovery_strength = min(1.0, failure_to_success / max(1, errors))
+
+        suppression_hints = dict(cluster_suppression_hints[cid])
+        suppression_total = sum(suppression_hints.values())
+        suppression_ratio = suppression_total / n if n > 0 else 0.0
+        blast_radius = len(cluster_services[cid].keys())
+
         # -------------------------------------
         # Output
         # -------------------------------------
@@ -359,6 +416,27 @@ def run_trigger_analysis(
                 {"service": s, "count": int(c)}
                 for s, c in cluster_dep_targets[cid].most_common(5)
             ],
+            "service_spread": {
+                "distinct_services": int(blast_radius),
+                "top_services": [
+                    {
+                        "service": s,
+                        "count": int(c),
+                        "ratio": round((c / n), 6) if n > 0 else 0.0,
+                    }
+                    for s, c in cluster_services[cid].most_common(5)
+                ],
+            },
+            "suppression_hints": {
+                "counts": {k: int(v) for k, v in suppression_hints.items()},
+                "ratio": round(suppression_ratio, 6),
+            },
+            "recovery_signals": {
+                "failure_to_success": int(cluster_recovery_counts[cid]["failure_to_success"]),
+                "retry_hints": int(cluster_recovery_counts[cid]["retry_hints"]),
+                "recovered_hints": int(cluster_recovery_counts[cid]["recovered_hints"]),
+                "recovery_strength": round(recovery_strength, 6),
+            },
             "signal_quality": {
                 "coverage_score": round(coverage_score, 6),
                 "field_coverage": {k: round(v, 6) for k, v in field_cov_ratios.items()},

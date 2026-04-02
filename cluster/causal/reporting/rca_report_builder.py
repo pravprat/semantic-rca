@@ -74,6 +74,23 @@ def build_rca_report(
             all_candidates=candidates,
             root_events=root_events,
         )
+        incident_conf = incident.get("confidence") if isinstance(incident.get("confidence"), dict) else {}
+        if incident_conf:
+            model_score = float(confidence.get("score", 0.0) or 0.0)
+            detect_score = float(incident_conf.get("score", 0.0) or 0.0)
+            merged_score = round((0.7 * model_score) + (0.3 * detect_score), 6)
+            if merged_score >= 0.80:
+                merged_label = "high"
+            elif merged_score >= 0.55:
+                merged_label = "medium"
+            else:
+                merged_label = "low"
+            confidence["score"] = merged_score
+            confidence["label"] = merged_label
+            confidence["incident_detection"] = {
+                "score": detect_score,
+                "level": incident_conf.get("level"),
+            }
 
         blast_radius = compute_blast_radius(
             profiles=None,  # optional for now
@@ -84,6 +101,13 @@ def build_rca_report(
 
         reports.append({
             "incident_id": incident_id,
+            "incident_metadata": {
+                "incident_version": incident.get("incident_version"),
+                "episode_count": incident.get("episode_count"),
+                "incident_class": incident.get("incident_class"),
+                "declaration": incident.get("declaration"),
+                "policy_summary": incident.get("policy_summary"),
+            },
             "incident_window": {
                 "start_time": incident.get("start_time"),
                 "end_time": incident.get("end_time"),

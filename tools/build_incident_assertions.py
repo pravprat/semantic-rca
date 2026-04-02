@@ -61,6 +61,8 @@ def build_assertions(
         cand_item = cand_map.get(iid, {})
         root_item = roots_map.get(iid, {})
         bundle_item = bundle_map.get(iid, {})
+        declaration = str(inc.get("declaration") or "incident")
+        confidence_score = float(((inc.get("confidence") or {}).get("score") or 0.0))
 
         cand_list = cand_item.get("candidates", [])
         top = cand_list[0] if cand_list else {}
@@ -85,6 +87,24 @@ def build_assertions(
             }
         )
 
+        # A0: Step 5 policy declaration consistency.
+        allowed_decl = {"incident", "possible_incident"}
+        assertions.append(
+            {
+                "assertion_id": "A0_step5_declaration_allowed",
+                "status": "pass" if declaration in allowed_decl else "fail",
+                "rule": "incident.declaration in {'incident','possible_incident'}",
+                "observed": {
+                    "declaration": declaration,
+                    "incident_class": inc.get("incident_class"),
+                    "incident_confidence_score": confidence_score,
+                },
+                "threshold": {"allowed_declarations": sorted(allowed_decl)},
+                "severity": "high",
+                "impact_on_confidence": 0.08,
+            }
+        )
+
         # A2: Candidate score gap from second candidate is meaningful.
         top_score = float(top.get("candidate_score", 0.0) or 0.0)
         second_score = float(second.get("candidate_score", 0.0) or 0.0)
@@ -102,6 +122,30 @@ def build_assertions(
                 "threshold": {"gap_gte": 0.10},
                 "severity": "medium",
                 "impact_on_confidence": 0.08,
+            }
+        )
+
+        # A5: Low declaration should not claim high confidence.
+        if declaration == "possible_incident":
+            status = "pass" if confidence_score < 0.70 else "fail"
+            rule = "possible_incident => incident.confidence.score < 0.70"
+            threshold = {"max_confidence_for_possible_incident": 0.70}
+        else:
+            status = "inconclusive"
+            rule = "applies only to possible_incident declarations"
+            threshold = {}
+        assertions.append(
+            {
+                "assertion_id": "A5_possible_incident_confidence_bound",
+                "status": status,
+                "rule": rule,
+                "observed": {
+                    "declaration": declaration,
+                    "incident_confidence_score": round(confidence_score, 6),
+                },
+                "threshold": threshold,
+                "severity": "medium",
+                "impact_on_confidence": 0.04,
             }
         )
 
@@ -158,7 +202,13 @@ def build_assertions(
         results.append(
             {
                 "incident_id": iid,
-                "assertion_version": "1.0",
+                "assertion_version": "1.1",
+                "incident_metadata": {
+                    "incident_class": inc.get("incident_class"),
+                    "declaration": declaration,
+                    "episode_count": inc.get("episode_count"),
+                    "confidence": inc.get("confidence"),
+                },
                 "assertions": assertions,
                 "summary": summary,
             }
