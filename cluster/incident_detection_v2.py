@@ -61,27 +61,14 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 def _build_episodes_for_cluster(
     cluster_id: str,
-    events: List[Dict[str, Any]],
-    event_cluster_map: Dict[str, str],
+    cluster_rows: List[Tuple[datetime, Dict[str, Any]]],
     intra_cluster_gap_seconds: int,
     baseline_failure_eps: float,
 ) -> List[Dict[str, Any]]:
-    rows: List[Tuple[datetime, Dict[str, Any]]] = []
-    for e in events:
-        eid = e.get("event_id")
-        if event_cluster_map.get(eid) != cluster_id:
-            continue
-        if not _is_failure_event(e):
-            continue
-        ts = _parse_ts(e.get("timestamp"))
-        if not ts:
-            continue
-        rows.append((ts, e))
-
-    if not rows:
+    if not cluster_rows:
         return []
 
-    rows.sort(key=lambda x: x[0])
+    rows = sorted(cluster_rows, key=lambda x: x[0])
     episodes: List[List[Tuple[datetime, Dict[str, Any]]]] = []
     cur: List[Tuple[datetime, Dict[str, Any]]] = []
     gap = timedelta(seconds=max(1, intra_cluster_gap_seconds))
@@ -174,13 +161,25 @@ def run_incident_detection_v2(
         baseline_failure_eps = len(all_fail_ts) / max(1.0, (t1 - t0).total_seconds())
 
     candidate_clusters = [cid for cid, s in stats.items() if s.get("is_candidate")]
+    # Pre-group failure rows once to avoid O(clusters * events) scans.
+    failure_rows_by_cluster: Dict[str, List[Tuple[datetime, Dict[str, Any]]]] = defaultdict(list)
+    for e in events:
+        if not _is_failure_event(e):
+            continue
+        ts = _parse_ts(e.get("timestamp"))
+        if not ts:
+            continue
+        eid = e.get("event_id")
+        cid = event_cluster_map.get(eid)
+        if cid:
+            failure_rows_by_cluster[cid].append((ts, e))
+
     episodes: List[Dict[str, Any]] = []
     for cid in candidate_clusters:
         episodes.extend(
             _build_episodes_for_cluster(
                 cluster_id=cid,
-                events=events,
-                event_cluster_map=event_cluster_map,
+                cluster_rows=failure_rows_by_cluster.get(cid, []),
                 intra_cluster_gap_seconds=intra_cluster_gap_seconds,
                 baseline_failure_eps=baseline_failure_eps,
             )
