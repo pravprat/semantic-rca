@@ -23,6 +23,8 @@ def run_incident_detection(
     output_path: str,
     gap_seconds: int = 30,
     max_seeds: int = 3,
+    cluster_window_cap_seconds: int = 900,
+    max_incident_duration_seconds: int = 3600,
     status_output_path: str | None = None,
 ):
 
@@ -48,10 +50,19 @@ def run_incident_detection(
         if not start or not end:
             continue
 
+        # Cap each cluster's effective incident contribution window.
+        # This prevents long-lived semantic clusters from forcing multi-hour incidents.
+        effective_end = end
+        if cluster_window_cap_seconds > 0:
+            capped = start + timedelta(seconds=cluster_window_cap_seconds)
+            if capped < effective_end:
+                effective_end = capped
+
         triggers.append({
             "cluster_id": cid,
             "start": start,
-            "end": end,
+            "end": effective_end,
+            "raw_end": end,
             "trigger_score": float(s.get("trigger_score", 0.0))
         })
 
@@ -82,7 +93,7 @@ def run_incident_detection(
     # Step 3: Merge into incidents
     # -------------------------------
     incidents: List[List[Dict[str, Any]]] = []
-    current = []
+    current: List[Dict[str, Any]] = []
 
     for c in triggers:
 
@@ -100,6 +111,43 @@ def run_incident_detection(
 
     if current:
         incidents.append(current)
+
+    # -------------------------------
+    # Step 3B: Deterministic right-sizing
+    # -------------------------------
+    if max_incident_duration_seconds > 0:
+        resized: List[List[Dict[str, Any]]] = []
+        for inc in incidents:
+            if not inc:
+                continue
+            local = sorted(inc, key=lambda x: x["start"])
+            part: List[Dict[str, Any]] = []
+            part_start = None
+            part_end = None
+            for c in local:
+                if not part:
+                    part = [c]
+                    part_start = c["start"]
+                    part_end = c["end"]
+                    continue
+
+                cand_end = max(part_end, c["end"]) if part_end else c["end"]
+                cand_dur = int((cand_end - part_start).total_seconds()) if part_start else 0
+                contiguous = c["start"] <= (part_end + timedelta(seconds=gap_seconds))
+
+                # Keep deterministic and bounded: must be contiguous and within duration cap.
+                if contiguous and cand_dur <= max_incident_duration_seconds:
+                    part.append(c)
+                    part_end = cand_end
+                else:
+                    resized.append(part)
+                    part = [c]
+                    part_start = c["start"]
+                    part_end = c["end"]
+
+            if part:
+                resized.append(part)
+        incidents = resized
 
     # -------------------------------
     # Step 4: Build output

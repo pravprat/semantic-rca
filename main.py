@@ -123,17 +123,37 @@ def cmd_trigger_analysis(args):
 # ------------------------------------------------------------
 
 from cluster.incident_detection import run_incident_detection
+from cluster.incident_detection_v2 import run_incident_detection_v2
 from tools.build_preincident_diagnostics import build_preincident_diagnostics, render_markdown
 
 
 def cmd_incident_detection(args):
-    out = run_incident_detection(
-        cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
-        output_path=str(PATHS["incidents"]),
-        gap_seconds=getattr(args, "gap_seconds", 30),
-        max_seeds=getattr(args, "max_seeds", 3),
-        status_output_path=str(PATHS["incident_detection_status"]),
-    )
+    incident_mode = getattr(args, "incident_mode", "v2")
+    if incident_mode == "v2":
+        out = run_incident_detection_v2(
+            cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
+            output_path=str(PATHS["incidents"]),
+            events_path=str(PATHS["events"]),
+            event_cluster_map_path=str(PATHS["event_cluster_map"]),
+            gap_seconds=getattr(args, "gap_seconds", 30),
+            max_seeds=getattr(args, "max_seeds", 3),
+            intra_cluster_gap_seconds=getattr(args, "intra_cluster_gap_seconds", 60),
+            episode_score_threshold=getattr(args, "episode_score_threshold", 0.45),
+            inter_episode_gap_seconds=getattr(args, "inter_episode_gap_seconds", 120),
+            max_incident_duration_seconds=getattr(args, "max_incident_duration_seconds", 14400),
+            semantic_jaccard_threshold=getattr(args, "semantic_jaccard_threshold", 0.3),
+            status_output_path=str(PATHS["incident_detection_status"]),
+        )
+    else:
+        out = run_incident_detection(
+            cluster_trigger_stats_path=str(PATHS["trigger_stats"]),
+            output_path=str(PATHS["incidents"]),
+            gap_seconds=getattr(args, "gap_seconds", 30),
+            max_seeds=getattr(args, "max_seeds", 3),
+            cluster_window_cap_seconds=getattr(args, "cluster_window_cap_seconds", 900),
+            max_incident_duration_seconds=getattr(args, "max_incident_duration_seconds", 3600),
+            status_output_path=str(PATHS["incident_detection_status"]),
+        )
     return out
 
 
@@ -405,8 +425,15 @@ def build_parser():
 
     # incident detection
     detection = sub.add_parser("incident_detection", help="Detect incidents")
+    detection.add_argument("--incident-mode", choices=["v1", "v2"], default="v2")
     detection.add_argument("--gap-seconds", type=int, default=30)
     detection.add_argument("--max-seeds", type=int, default=3)
+    detection.add_argument("--intra-cluster-gap-seconds", type=int, default=60)
+    detection.add_argument("--episode-score-threshold", type=float, default=0.45)
+    detection.add_argument("--inter-episode-gap-seconds", type=int, default=120)
+    detection.add_argument("--semantic-jaccard-threshold", type=float, default=0.3)
+    detection.add_argument("--cluster-window-cap-seconds", type=int, default=900)
+    detection.add_argument("--max-incident-duration-seconds", type=int, default=14400)
     detection.set_defaults(func=cmd_incident_detection)
 
     # causal analysis (Step 6)
@@ -476,6 +503,13 @@ def build_parser():
     )
     allp.add_argument("--gap-seconds", type=int, default=30)
     allp.add_argument("--max-seeds", type=int, default=3)
+    allp.add_argument("--incident-mode", choices=["v1", "v2"], default="v2")
+    allp.add_argument("--intra-cluster-gap-seconds", type=int, default=60)
+    allp.add_argument("--episode-score-threshold", type=float, default=0.45)
+    allp.add_argument("--inter-episode-gap-seconds", type=int, default=120)
+    allp.add_argument("--semantic-jaccard-threshold", type=float, default=0.3)
+    allp.add_argument("--cluster-window-cap-seconds", type=int, default=900)
+    allp.add_argument("--max-incident-duration-seconds", type=int, default=14400)
     allp.add_argument("--ingest-file-batch-size", type=int, default=20)
     allp.add_argument("--ingest-event-batch-size", type=int, default=5000)
     allp.add_argument("--embed-chunk-size", type=int, default=12000)
