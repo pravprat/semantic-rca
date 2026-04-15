@@ -70,16 +70,57 @@ def get_paths(args) -> dict[str, Path]:
 # ------------------------------------------------------------
 
 from parsers.ingest_runner import run_ingest
+from tools.build_log_triage_slices import build_triage
+
+
+def _resolve_ingest_logfile_list(args, output_dir: Path) -> tuple[str | None, Path | None]:
+    """
+    Returns (logfile_list_path or None, triage_output_dir or None).
+    If --triage, runs failure-signal triage and returns path to selected_log_files.txt.
+    """
+    logfile_list = getattr(args, "logfile_list", None)
+    if not getattr(args, "triage", False):
+        return logfile_list, None
+
+    if logfile_list:
+        raise ValueError("Use either --triage or --logfile-list, not both.")
+
+    input_dir = getattr(args, "triage_input_dir", None) or args.logfile
+    if not input_dir:
+        raise ValueError("--triage requires logfile (as a directory) or --triage-input-dir")
+
+    root = Path(input_dir)
+    if not root.is_dir():
+        raise ValueError(f"--triage requires a directory path; got: {input_dir}")
+
+    tout = getattr(args, "triage_output_dir", None)
+    triage_out = Path(tout) if tout else (output_dir / "log_triage")
+    manifest = build_triage(
+        input_dir=root,
+        output_dir=triage_out,
+        top_n=getattr(args, "triage_top_n", 40),
+        min_weighted_score=getattr(args, "triage_min_weighted_score", 10),
+        max_lines_per_file=getattr(args, "triage_max_lines_per_file", 0),
+    )
+    selected = triage_out / "selected_log_files.txt"
+    print(
+        f"[ingest] triage: selected={manifest['files_selected']} "
+        f"eligible={manifest['files_meeting_threshold']} -> {selected}"
+    )
+    return str(selected), triage_out
 
 
 def cmd_ingest(args):
     paths = get_paths(args)
     paths["output_dir"].mkdir(parents=True, exist_ok=True)
+    logfile_list, _ = _resolve_ingest_logfile_list(args, paths["output_dir"])
+    logfile = args.logfile if args.logfile else "."
     run_ingest(
-        logfile=args.logfile,
+        logfile=logfile,
         output_path=str(paths["events"]),
         file_batch_size=getattr(args, "ingest_file_batch_size", 20),
         batch_size=getattr(args, "ingest_event_batch_size", 5000),
+        logfile_list=logfile_list,
     )
 
 # ------------------------------------------------------------
@@ -358,8 +399,18 @@ PIPELINE_STEPS = [
 def cmd_all(args):
     import time
 
-    if not args.logfile:
-        raise ValueError("logfile is required for 'all' command")
+    triage_ok = getattr(args, "triage", False) and (
+        args.logfile or getattr(args, "triage_input_dir", None)
+    )
+    if (
+        not args.logfile
+        and not getattr(args, "logfile_list", None)
+        and not triage_ok
+    ):
+        raise ValueError(
+            "Either logfile, --logfile-list, or --triage with logfile (dir) / --triage-input-dir "
+            "is required for 'all' command"
+        )
 
     if getattr(args, "clean", False):
         clean_outputs()
@@ -387,7 +438,7 @@ def cmd_all(args):
                 cmd_preincident_diagnostics(args)
                 print("\n[PIPELINE] running post-run validation")
                 args.outputs_dir = paths["output_dir"]
-                args.raw_log = args.logfile
+                args.raw_log = args.logfile or getattr(args, "triage_input_dir", None)
                 cmd_validate_outputs(args)
                 print("[PIPELINE] stopping after diagnostics (no incident path)")
                 print(f"Outputs available at: {paths['output_dir']}")
@@ -397,7 +448,7 @@ def cmd_all(args):
     print(f"Outputs available at: {paths['output_dir']}")
     print("\n[PIPELINE] running post-run validation")
     args.outputs_dir = paths["output_dir"]
-    args.raw_log = args.logfile
+    args.raw_log = args.logfile or getattr(args, "triage_input_dir", None)
     cmd_validate_outputs(args)
 
 
@@ -417,10 +468,43 @@ def build_parser():
         sp.add_argument("--pipeline-profile", choices=["v1", "v2"], default="v1")
         sp.add_argument("--outputs-root", default=str(DEFAULT_OUTPUTS_ROOT))
 
+    def add_triage_args(sp):
+        sp.add_argument(
+            "--triage",
+            action="store_true",
+            help="Pre-scan logs with weighted failure-regex triage; ingest only selected files",
+        )
+        sp.add_argument(
+            "--triage-input-dir",
+            default=None,
+            help="Directory to scan (default: logfile when it is a directory)",
+        )
+        sp.add_argument(
+            "--triage-output-dir",
+            default=None,
+            help="Where to write selected_log_files.txt and triage_manifest.json "
+            "(default: <profile output>/log_triage)",
+        )
+        sp.add_argument("--triage-top-n", type=int, default=40, help="Max files to keep after ranking")
+        sp.add_argument(
+            "--triage-min-weighted-score",
+            type=int,
+            default=10,
+            help="Minimum triage score for a file to be eligible",
+        )
+        sp.add_argument(
+            "--triage-max-lines-per-file",
+            type=int,
+            default=0,
+            help="Cap lines read per file during triage (0 = full file)",
+        )
+
     # ingest
     ingest = sub.add_parser("ingest", help="Parse raw logs into events.jsonl")
     add_profile_args(ingest)
-    ingest.add_argument("logfile")
+    add_triage_args(ingest)
+    ingest.add_argument("logfile", nargs="?", help="Path to raw logfile or directory")
+    ingest.add_argument("--logfile-list", default=None, help="Path to newline-delimited file list")
     ingest.add_argument("--ingest-file-batch-size", type=int, default=20)
     ingest.add_argument("--ingest-event-batch-size", type=int, default=5000)
     ingest.set_defaults(func=cmd_ingest)
@@ -528,7 +612,9 @@ def build_parser():
         help="Run full pipeline end-to-end"
     )
     add_profile_args(allp)
-    allp.add_argument("logfile", nargs="?", help="Path to raw logfile")
+    add_triage_args(allp)
+    allp.add_argument("logfile", nargs="?", help="Path to raw logfile or directory")
+    allp.add_argument("--logfile-list", default=None, help="Path to newline-delimited file list for ingest")
     allp.add_argument("--min-cluster-size", type=int, default=15)
     allp.add_argument("--pca-dims", type=int, default=256)
     allp.add_argument("--max-cluster-events", type=int, default=120000)

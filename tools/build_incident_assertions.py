@@ -35,6 +35,22 @@ def _status_from_threshold(
     return "inconclusive"
 
 
+def _is_failure_event(ev: Dict[str, Any]) -> bool:
+    rc = ev.get("response_code")
+    try:
+        if rc is not None and int(rc) >= 400:
+            return True
+    except Exception:
+        pass
+    if str(ev.get("status_family") or "").lower() == "failure":
+        return True
+    if ev.get("failure_hint"):
+        return True
+    sem = ev.get("semantic") if isinstance(ev.get("semantic"), dict) else {}
+    mode = str((sem or {}).get("failure_mode") or "").lower()
+    return bool(mode and mode not in {"normal", "unknown"})
+
+
 def build_assertions(
     incidents_path: Path,
     candidates_path: Path,
@@ -84,6 +100,28 @@ def build_assertions(
                 "threshold": {"net_gt": 0.0},
                 "severity": "high",
                 "impact_on_confidence": 0.12,
+            }
+        )
+
+        # A6: Provenance should include observed log evidence for high-trust claims.
+        prov = bundle_item.get("provenance", {}) if isinstance(bundle_item.get("provenance"), dict) else {}
+        observed_events = int(prov.get("observed_log_evidence_events", 0) or 0)
+        source = str(prov.get("root_cause_source") or "unknown")
+        assertions.append(
+            {
+                "assertion_id": "A6_provenance_observed_logs_present",
+                "status": "pass" if observed_events > 0 and source in {"logs_only", "logs_plus_external"} else "fail",
+                "rule": "provenance has observed log evidence and logs-based source",
+                "observed": {
+                    "root_cause_source": source,
+                    "observed_log_evidence_events": observed_events,
+                },
+                "threshold": {
+                    "observed_log_evidence_events_gt": 0,
+                    "allowed_sources": ["logs_only", "logs_plus_external"],
+                },
+                "severity": "high",
+                "impact_on_confidence": 0.08,
             }
         )
 
@@ -153,18 +191,14 @@ def build_assertions(
         root_total = len(root_events)
         failure_like = 0
         for ev in root_events:
-            rc = ev.get("response_code")
-            try:
-                if rc is not None and int(rc) >= 400:
-                    failure_like += 1
-            except Exception:
-                pass
+            if _is_failure_event(ev):
+                failure_like += 1
         ratio = (failure_like / root_total) if root_total else 0.0
         assertions.append(
             {
                 "assertion_id": "A3_root_events_failure_class",
                 "status": _status_from_threshold(ratio, 1.0, op="=="),
-                "rule": "all root_events.response_code >= 400",
+                "rule": "all root_events are failure-class by multi-signal policy",
                 "observed": {
                     "root_events_total": root_total,
                     "failure_class_events": failure_like,

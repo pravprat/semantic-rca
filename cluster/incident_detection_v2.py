@@ -121,6 +121,7 @@ def _build_cluster_windows(
                 "start": start,
                 "end": capped_end,
                 "trigger_score": _safe_float(s.get("trigger_score")),
+                "incident_strength": _safe_float(s.get("incident_strength"), _safe_float(s.get("trigger_score"))),
                 "stat": s,
             }
         )
@@ -169,7 +170,7 @@ def _episode_signature(episode: List[Dict[str, Any]]) -> Dict[str, Any]:
         modes |= _extract_modes(s)
         targets |= _extract_targets(s)
         tokens |= _extract_actor_resource_tokens(s)
-        score_sum += _safe_float(w.get("trigger_score"))
+        score_sum += _safe_float(w.get("incident_strength"), _safe_float(w.get("trigger_score")))
     return {
         "modes": modes,
         "targets": targets,
@@ -277,7 +278,9 @@ def run_incident_detection_v2(
         score_by_cluster: Dict[str, float] = {}
         for w in flat:
             cid = w["cluster_id"]
-            score_by_cluster[cid] = score_by_cluster.get(cid, 0.0) + _safe_float(w["trigger_score"])
+            score_by_cluster[cid] = score_by_cluster.get(cid, 0.0) + _safe_float(
+                w.get("incident_strength"), _safe_float(w.get("trigger_score"))
+            )
         ranked_clusters = sorted(score_by_cluster.items(), key=lambda x: x[1], reverse=True)
 
         seed_clusters = [
@@ -324,7 +327,7 @@ def run_incident_detection_v2(
         if avg_suppression_ratio >= 0.4 and error_ratio < 0.25:
             declaration = "suppressed"
             suppression_reason = "high_suppression_hints_low_failure_ratio"
-        elif duration < 45 and error_count < 6:
+        elif duration < 120 or error_count < 12:
             declaration = "possible_incident"
 
         # Policy confidence score (0..1).
@@ -350,6 +353,14 @@ def run_incident_detection_v2(
             confidence_level = "medium"
         else:
             confidence_level = "low"
+        # Final declaration gate: avoid promoting weak/noisy episodes.
+        if declaration == "incident":
+            strict_policy_ok = (
+                (error_ratio >= 0.08 and duration >= 180 and cluster_count >= 2 and score_norm >= 0.20)
+                or (error_ratio >= 0.15 and duration >= 90 and score_norm >= 0.18)
+            )
+            if not strict_policy_ok:
+                declaration = "possible_incident"
         if declaration == "incident" and confidence_level == "low":
             declaration = "possible_incident"
 

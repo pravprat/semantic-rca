@@ -88,13 +88,21 @@ def _compute_anomaly_onset(
     primary_event: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     anomalous: List[Dict[str, Any]] = []
+    detection_rule = "first_failure_multisignal"
     for ev in root_events:
         rc = ev.get("response_code")
+        status_family = str(ev.get("status_family") or "").lower()
+        failure_hint = ev.get("failure_hint")
+        sem = ev.get("semantic") if isinstance(ev.get("semantic"), dict) else {}
+        sem_mode = str((sem or {}).get("failure_mode") or "").lower()
         try:
             if rc is not None and int(rc) >= 400:
                 anomalous.append(ev)
+                continue
         except Exception:
-            continue
+            pass
+        if status_family == "failure" or failure_hint or (sem_mode and sem_mode not in {"normal", "unknown"}):
+            anomalous.append(ev)
 
     anomalous.sort(key=lambda e: (_parse_ts(e.get("timestamp")) is None, _parse_ts(e.get("timestamp"))))
     first = anomalous[0] if anomalous else None
@@ -107,7 +115,7 @@ def _compute_anomaly_onset(
             delta_to_primary_seconds = round((t2 - t1).total_seconds(), 3)
 
     return {
-        "detection_rule": "first_failure_response_code_gte_400",
+        "detection_rule": detection_rule,
         "first_anomaly_timestamp": (first or {}).get("timestamp"),
         "first_anomaly_event_id": (first or {}).get("event_id"),
         "first_anomaly_cluster_id": (first or {}).get("cluster_id"),
@@ -142,6 +150,23 @@ def _failure_mode_from_event(ev: Dict[str, Any]) -> str:
     if sc == "4xx":
         return "client_or_auth_failure"
     return "normal"
+
+
+def _is_failure_event(ev: Dict[str, Any]) -> bool:
+    rc = ev.get("response_code")
+    status_family = str(ev.get("status_family") or "").lower()
+    try:
+        if rc is not None and int(rc) >= 400:
+            return True
+    except Exception:
+        pass
+    if status_family == "failure":
+        return True
+    if ev.get("failure_hint"):
+        return True
+    sem = ev.get("semantic") if isinstance(ev.get("semantic"), dict) else {}
+    mode = str((sem or {}).get("failure_mode") or "").lower()
+    return bool(mode and mode not in {"normal", "unknown"})
 
 
 def _system_owner_for_service(service: str, text: str = "") -> Dict[str, str]:
@@ -253,13 +278,7 @@ def _compute_post_anomaly_impacts(
         status_counts[sc] = status_counts.get(sc, 0) + 1
 
         rc = e.get("response_code")
-        status_family = str(e.get("status_family") or "").lower()
-        is_failure = False
-        try:
-            is_failure = int(rc) >= 400
-        except Exception:
-            is_failure = status_family == "failure"
-        if is_failure:
+        if _is_failure_event(e):
             failure_events.append(e)
             mode = _failure_mode_from_event(e)
             mode_counts[mode] = mode_counts.get(mode, 0) + 1
@@ -267,7 +286,16 @@ def _compute_post_anomaly_impacts(
             res = e.get("resource")
             if isinstance(svc, str) and svc:
                 svc_counts[svc] = svc_counts.get(svc, 0) + 1
-                comp = _system_owner_for_service(svc, str(e.get("raw_text") or ""))
+                sem = e.get("semantic") if isinstance(e.get("semantic"), dict) else {}
+                sf = e.get("structured_fields") if isinstance(e.get("structured_fields"), dict) else {}
+                comp_name = (
+                    (sem or {}).get("component")
+                    or (sf.get("component") if isinstance(sf, dict) else None)
+                )
+                if comp_name:
+                    comp = {"component": str(comp_name)}
+                else:
+                    comp = _system_owner_for_service(svc, str(e.get("raw_text") or ""))
                 c_key = comp.get("component") or "unknown_component"
                 component_counts[c_key] = component_counts.get(c_key, 0) + 1
             if isinstance(res, str) and res:
@@ -353,14 +381,7 @@ def _compute_post_anomaly_impacts(
     pre_fail = 0
     pre_mode_counts: Dict[str, int] = {}
     for e in pre_slice:
-        rc = e.get("response_code")
-        status_family = str(e.get("status_family") or "").lower()
-        is_failure = False
-        try:
-            is_failure = int(rc) >= 400
-        except Exception:
-            is_failure = status_family == "failure"
-        if is_failure:
+        if _is_failure_event(e):
             pre_fail += 1
             mode = _failure_mode_from_event(e)
             pre_mode_counts[mode] = pre_mode_counts.get(mode, 0) + 1
@@ -376,14 +397,6 @@ def _compute_post_anomaly_impacts(
     post_rate = _safe_rate(len(failure_events), post_seconds)
 
     # Fixed-window pre/post rates around anomaly onset.
-    def _is_failure_event(e: Dict[str, Any]) -> bool:
-        rc = e.get("response_code")
-        status_family = str(e.get("status_family") or "").lower()
-        try:
-            return int(rc) >= 400
-        except Exception:
-            return status_family == "failure"
-
     pre_window_fail = [e for e in pre_window if _is_failure_event(e)]
     post_window_fail = [e for e in post_window if _is_failure_event(e)]
     fixed_pre_5xx_count = 0
@@ -659,6 +672,7 @@ def build_evidence_bundle(
                 "graph_path": str(graph_path),
                 "report_path": str(report_path),
             },
+            "provenance": report_item.get("provenance", {}),
             "claims": [claim],
             "coverage": coverage,
             "anomaly_onset": anomaly_onset,

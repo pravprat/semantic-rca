@@ -13,6 +13,7 @@ from cluster.causal.utils.io_utils import load_json, load_jsonl, write_json
 from cluster.causal.validation.candidate_checks import validate_candidates
 from cluster.causal.validation.event_checks import validate_grounded_events
 from cluster.causal.validation.graph_checks import validate_graph
+from semantic.component_registry import resolve_component
 
 
 # ============================================================
@@ -71,9 +72,31 @@ class EventResolver:
     def _is_failure_event(ev: Dict[str, Any]) -> bool:
         rc = ev.get("response_code")
         try:
-            return rc is not None and int(rc) >= 400
+            if rc is not None and int(rc) >= 400:
+                return True
         except Exception:
-            return False
+            pass
+        status_family = str(ev.get("status_family") or "").lower()
+        if status_family == "failure":
+            return True
+        sev = str(ev.get("severity") or "").upper()
+        if sev in {"ERROR", "FATAL"}:
+            return True
+        if ev.get("failure_hint"):
+            return True
+        sem = ev.get("semantic") if isinstance(ev.get("semantic"), dict) else {}
+        mode = str((sem or {}).get("failure_mode") or "").strip().lower()
+        if mode and mode not in {"normal", "unknown"}:
+            return True
+        txt = str(
+            ev.get("message")
+            or ev.get("msg")
+            or ev.get("raw_text")
+            or ev.get("normalized_text")
+            or ""
+        ).lower()
+        timeout_tokens = ("timeout", "timed out", "deadline exceeded", "connection refused", "connection reset", "exception", "failed")
+        return any(tok in txt for tok in timeout_tokens)
 
     def resolve(
         self,
@@ -109,11 +132,25 @@ class EventResolver:
             )
 
             for i, ev in enumerate(evs_sorted[:top_k_per_cluster]):
+                service = ev.get("service") or ev.get("actor")
+                sem = ev.get("semantic") if isinstance(ev.get("semantic"), dict) else {}
+                component = (sem or {}).get("component")
+                comp_domain = (sem or {}).get("domain")
+                if not component:
+                    comp, dom = resolve_component(str(service or ""), str(ev.get("raw_text") or ""))
+                    component = comp
+                    comp_domain = comp_domain or dom
                 results.append({
                     "cluster_id": cid,
                     "event_id": ev.get("event_id"),
                     "timestamp": ev.get("timestamp"),
                     "response_code": ev.get("response_code"),
+                    "status_family": ev.get("status_family"),
+                    "severity": ev.get("severity"),
+                    "failure_hint": ev.get("failure_hint"),
+                    "service": service,
+                    "component": component,
+                    "component_domain": comp_domain,
                     "actor": ev.get("actor"),
                     "resource": ev.get("resource"),
                     "reason": "earliest_failure" if i == 0 else "supporting_failure",

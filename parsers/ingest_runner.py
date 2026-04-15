@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import gzip
+from pathlib import Path
 from typing import List, Dict, Any
 
 from parsers.log_reader import LogReader, iter_log_files
@@ -17,6 +18,7 @@ def run_ingest(
     output_path: str,
     batch_size: int = 5000,
     file_batch_size: int = 20,
+    logfile_list: str | None = None,
 ) -> None:
 
     reader = LogReader()
@@ -24,11 +26,19 @@ def run_ingest(
 
     count = 0
     batch: List[Dict[str, Any]] = []
-    files = iter_log_files(logfile)
+    if logfile_list:
+        list_path = Path(logfile_list)
+        if not list_path.exists():
+            raise RuntimeError(f"logfile list does not exist: {logfile_list}")
+        raw_lines = list_path.read_text(encoding="utf-8").splitlines()
+        files = [Path(x.strip()) for x in raw_lines if x.strip()]
+    else:
+        files = iter_log_files(logfile)
     total_files = len(files)
 
     if total_files == 0:
-        raise RuntimeError(f"No input log files found at: {logfile}")
+        src = f"logfile list {logfile_list}" if logfile_list else f"path {logfile}"
+        raise RuntimeError(f"No input log files found from {src}")
 
     print(
         f"[ingest] discovered files={total_files} "

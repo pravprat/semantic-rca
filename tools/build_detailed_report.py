@@ -99,6 +99,7 @@ def build_detailed_report_json(
             "anomaly_onset": bundle.get("anomaly_onset", {}),
             "post_anomaly_impacts": bundle.get("post_anomaly_impacts", {}),
             "lineage": bundle.get("lineage", {}),
+            "provenance": bundle.get("provenance", {}) or report.get("provenance", {}),
         }
         detailed.append(entry)
 
@@ -156,8 +157,18 @@ def render_detailed_markdown(
 
         lines.append("## What Broke (Symptoms)\n")
         lines.append(f"- Symptom family: **{_symptom_type(summary)}**")
+        primary_signal_parts = []
+        if summary.get("primary_response_code") is not None:
+            primary_signal_parts.append(f"response_code=`{summary.get('primary_response_code')}`")
+        if summary.get("primary_status_family"):
+            primary_signal_parts.append(f"status_family=`{summary.get('primary_status_family')}`")
+        if summary.get("primary_severity"):
+            primary_signal_parts.append(f"severity=`{summary.get('primary_severity')}`")
+        if summary.get("primary_failure_hint"):
+            primary_signal_parts.append(f"failure_hint=`{summary.get('primary_failure_hint')}`")
+        signal_txt = ", ".join(primary_signal_parts) if primary_signal_parts else "multi-signal failure (no explicit http code)"
         lines.append(
-            f"- Primary observed symptom: response_code=`{summary.get('primary_response_code')}`, "
+            f"- Primary observed symptom: {signal_txt}, "
             f"actor=`{summary.get('primary_actor')}`, resource=`{summary.get('primary_resource')}`"
         )
         lines.append("- Downstream effects are listed in post-anomaly impact timelines below.\n")
@@ -305,6 +316,14 @@ def render_detailed_markdown(
             f"claims_total={cov.get('claims_total')} "
             f"({cov.get('coverage_pct')}%)\n"
         )
+
+        lines.append("## Evidence Provenance\n")
+        prov = forensic.get("provenance", {})
+        lines.append(f"- root_cause_source={prov.get('root_cause_source')}")
+        lines.append(f"- observed_log_evidence_events={prov.get('observed_log_evidence_events')}")
+        lines.append(f"- multisignal_failure_evidence_events={prov.get('multisignal_failure_evidence_events')}")
+        lines.append(f"- component_evidence_events={prov.get('component_evidence_events')}")
+        lines.append(f"- external_context_used={prov.get('external_context_used')}\n")
 
         lines.append("## Forensic Claims\n")
         claims = forensic.get("claims", [])

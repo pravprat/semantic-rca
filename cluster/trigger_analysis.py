@@ -340,6 +340,20 @@ def run_trigger_analysis(
         suppression_ratio = suppression_total / n if n > 0 else 0.0
         blast_radius = len(cluster_services[cid].keys())
 
+        # Multi-dimensional strength used by Step 5 declaration logic.
+        fallback_errors = cluster_fallback_error_count.get(cid, 0)
+        hint_div = len(cluster_failure_hints[cid])
+        hint_strength = min(1.0, hint_div / 3.0)
+        fallback_ratio = fallback_errors / n if n > 0 else 0.0
+        incident_strength = (
+            0.45 * adjusted_trigger
+            + 0.25 * error_rate
+            + 0.15 * coverage_score
+            + 0.10 * min(1.0, fallback_ratio * 2.0)
+            + 0.05 * hint_strength
+        )
+        incident_strength = round(max(0.0, min(1.0, incident_strength)), 6)
+
         # -------------------------------------
         # Output
         # -------------------------------------
@@ -351,7 +365,7 @@ def run_trigger_analysis(
 
             "event_count": n,
             "error_count": errors,
-            "fallback_error_count": cluster_fallback_error_count.get(cid, 0),
+            "fallback_error_count": fallback_errors,
             "failure_hint_diversity": len(cluster_failure_hints[cid]),
             "top_failure_hints": [k for k, _ in cluster_failure_hints[cid].most_common(3)],
             "response_class_counts": {
@@ -389,6 +403,8 @@ def run_trigger_analysis(
 
             # Final score
             "trigger_score": adjusted_trigger,
+            "anomaly_score": adjusted_trigger,
+            "incident_strength": incident_strength,
 
             # ✅ New signals
             "scale": round(scale, 6),
@@ -455,12 +471,24 @@ def run_trigger_analysis(
     for cid, s in results.items():
         hint_div = int(s.get("failure_hint_diversity") or 0)
         fallback_errors = int(s.get("fallback_error_count") or 0)
-        s["is_candidate"] = (
-                s["trigger_score"] >= 0.15
-                or s["error_count"] >= 3
-                or fallback_errors >= 5
-                or (fallback_errors >= 3 and hint_div >= 2)
+        error_rate = float(s.get("error_rate") or 0.0)
+        error_count = int(s.get("error_count") or 0)
+        trigger_score = float(s.get("trigger_score") or 0.0)
+        incident_strength = float(s.get("incident_strength") or 0.0)
+
+        # Separate sensitive anomaly detection from stricter incident seeding.
+        anomaly_gate = (
+            trigger_score >= 0.12
+            or error_count >= 3
+            or fallback_errors >= 3
         )
+        strong_http = error_rate >= 0.20 and error_count >= 5
+        strong_fallback = (
+            fallback_errors >= 8
+            or (fallback_errors >= 4 and hint_div >= 2 and error_rate >= 0.05)
+        )
+        strength_gate = incident_strength >= 0.22
+        s["is_candidate"] = anomaly_gate and (strength_gate or strong_http or strong_fallback)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)

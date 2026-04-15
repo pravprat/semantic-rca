@@ -51,6 +51,18 @@ def _suggest_log_targets(top_candidate: Dict[str, Any], root_events: List[Dict[s
     return targets
 
 
+def _fallback_root_event(top: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "event_id": None,
+        "timestamp": top.get("first_seen"),
+        "actor": top.get("actor"),
+        "resource": top.get("resource"),
+        "response_code": None,
+        "reason": "candidate_fallback",
+        "failure_domain": top.get("failure_domain"),
+    }
+
+
 def render_report(
     incidents_path: str,
     candidates_path: str,
@@ -76,11 +88,13 @@ def render_report(
         candidate_list = candidate_map.get(iid, {}).get("candidates", [])
         root_events = grounded_map.get(iid, {}).get("root_events", [])
 
-        if not candidate_list or not root_events:
+        if not candidate_list:
             lines.append(f"# Incident {iid}\nNo RCA data available.\n---\n")
             continue
 
         top = candidate_list[0]
+        if not root_events:
+            root_events = [_fallback_root_event(top)]
 
         pattern_info = classify_failure_pattern(root_events)
 
@@ -126,6 +140,8 @@ def render_report(
         lines.append(f"- **Primary Event:** {earliest['event_id']}\n")
         lines.append(f"- **Time:** {earliest['timestamp']}\n")
         lines.append(f"- **Actor:** {earliest.get('actor')}\n")
+        lines.append(f"- **Service:** {earliest.get('service')}\n")
+        lines.append(f"- **Component:** {earliest.get('component')}\n")
         lines.append(f"- **Resource:** {earliest.get('resource')}\n")
         lines.append(f"- **Response Code:** {earliest.get('response_code')}\n")
 

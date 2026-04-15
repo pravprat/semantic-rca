@@ -12,6 +12,39 @@ from cluster.causal.utils.io_utils import load_json, write_json
 from cluster.causal.reporting.blast_radius import compute_blast_radius
 
 
+def _build_provenance(root_events: List[Dict[str, Any]], explanation: Dict[str, Any]) -> Dict[str, Any]:
+    observed_count = len(root_events)
+    http_evidence = 0
+    multisignal_evidence = 0
+    component_evidence = 0
+    for ev in root_events:
+        rc = ev.get("response_code")
+        try:
+            if rc is not None and int(rc) >= 400:
+                http_evidence += 1
+        except Exception:
+            pass
+        if str(ev.get("status_family") or "").lower() == "failure" or ev.get("failure_hint"):
+            multisignal_evidence += 1
+        if ev.get("component") or ev.get("service"):
+            component_evidence += 1
+
+    if observed_count > 0:
+        source = "logs_only"
+    elif (explanation.get("evidence") or []):
+        source = "inferred_from_candidates"
+    else:
+        source = "inferred_only"
+    return {
+        "root_cause_source": source,
+        "observed_log_evidence_events": observed_count,
+        "http_failure_evidence_events": http_evidence,
+        "multisignal_failure_evidence_events": multisignal_evidence,
+        "component_evidence_events": component_evidence,
+        "external_context_used": False,
+    }
+
+
 def _group_root_events_by_incident(root_events_data: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {}
     for item in root_events_data:
@@ -116,6 +149,7 @@ def build_rca_report(
             "root_cause_summary": summary["root_cause"],
             "explanation": explanation["summary"],
             "evidence": explanation["evidence"],
+            "provenance": _build_provenance(root_events, explanation),
             "blast_radius": blast_radius,
             "confidence": confidence,
             "top_candidates": candidates[:5],

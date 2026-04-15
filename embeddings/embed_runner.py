@@ -21,6 +21,27 @@ class _IndexWriter:
         self._first = True
         self._pq_writer = None
         self._pa = None
+        self._schema = None
+
+    @staticmethod
+    def _prepare_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(row)
+        # Keep parquet schema stable across batches.
+        rc = out.get("response_code")
+        try:
+            out["response_code"] = int(rc) if rc not in (None, "", "null") else None
+        except Exception:
+            out["response_code"] = None
+        hc = out.get("http_class")
+        out["http_class"] = str(hc) if hc not in (None, "") else None
+        sem = out.get("semantic")
+        if isinstance(sem, (dict, list)):
+            out["semantic"] = json.dumps(sem, ensure_ascii=False, sort_keys=True)
+        elif sem is None:
+            out["semantic"] = None
+        else:
+            out["semantic"] = str(sem)
+        return out
 
     def __enter__(self):
         if self.as_parquet:
@@ -33,15 +54,34 @@ class _IndexWriter:
         if not rows:
             return
         if self.as_parquet:
+            prepared = [self._prepare_row(r) for r in rows]
             if self._pq_writer is None:
                 import pyarrow as pa  # type: ignore
                 import pyarrow.parquet as pq  # type: ignore
                 self._pa = pa
-                table = pa.Table.from_pylist(rows)
-                self._pq_writer = pq.ParquetWriter(self.path, table.schema)
+                self._schema = pa.schema([
+                    pa.field("event_id", pa.string()),
+                    pa.field("timestamp", pa.string()),
+                    pa.field("service", pa.string()),
+                    pa.field("severity", pa.string()),
+                    pa.field("actor", pa.string()),
+                    pa.field("verb", pa.string()),
+                    pa.field("resource", pa.string()),
+                    pa.field("response_code", pa.int64()),
+                    pa.field("http_class", pa.string()),
+                    pa.field("status_family", pa.string()),
+                    pa.field("failure_hint", pa.string()),
+                    pa.field("path", pa.string()),
+                    pa.field("stage", pa.string()),
+                    pa.field("semantic", pa.string()),
+                    pa.field("signature", pa.string()),
+                    pa.field("embedding_text", pa.string()),
+                ])
+                table = pa.Table.from_pylist(prepared, schema=self._schema)
+                self._pq_writer = pq.ParquetWriter(self.path, self._schema)
                 self._pq_writer.write_table(table)
             else:
-                self._pq_writer.write_table(self._pa.Table.from_pylist(rows))
+                self._pq_writer.write_table(self._pa.Table.from_pylist(prepared, schema=self._schema))
             return
         for row in rows:
             if not self._first:
